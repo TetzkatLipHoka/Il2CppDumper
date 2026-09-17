@@ -29,6 +29,17 @@ namespace Il2CppDumper
             readClassArray = GetType().GetMethod("ReadClassArray", new[] { typeof(long) });
             genericMethodCache = new();
             attributeCache = new();
+            if (input.Length < 0)
+            {
+                RootGenericInstantiations();
+            }
+        }
+
+        // NativeAOT only compiles generic instantiations it can see; the reflection based reader creates these at runtime
+        private void RootGenericInstantiations()
+        {
+            ReadClassArray<byte>(0);
+            ReadClassArray<ushort>(0);
         }
 
         public bool ReadBoolean() => reader.ReadBoolean();

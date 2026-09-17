@@ -375,7 +375,7 @@ namespace Il2CppDumper
             var jsonOptions = new JsonSerializerOptions() { WriteIndented = true, IncludeFields = true };
             File.WriteAllText(outputDir + "stringliteral.json", JsonSerializer.Serialize(stringLiterals, jsonOptions), new UTF8Encoding(false));
             //写入文件
-            File.WriteAllText(outputDir + "script.json", JsonSerializer.Serialize(json, jsonOptions));
+            File.WriteAllText(outputDir + "script.json", JsonSerializer.Serialize(json, ScriptJsonContext.Default.ScriptJson));
             //il2cpp.h
             for (int i = 0; i < genericClassList.Count; i++)
             {

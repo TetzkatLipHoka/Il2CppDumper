@@ -2,6 +2,11 @@
 
 namespace Il2CppDumper
 {
+    // source generated serializer: NativeAOT cannot create the reflection based converters for ulong[] at runtime
+    [System.Text.Json.Serialization.JsonSourceGenerationOptions(WriteIndented = true, IncludeFields = true)]
+    [System.Text.Json.Serialization.JsonSerializable(typeof(ScriptJson))]
+    public partial class ScriptJsonContext : System.Text.Json.Serialization.JsonSerializerContext { }
+
     public class ScriptJson
     {
         public List<ScriptMethod> ScriptMethod = new();
