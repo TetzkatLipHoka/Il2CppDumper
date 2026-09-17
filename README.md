@@ -29,6 +29,7 @@ Decrypted PS4/PS5 `Il2CppUserAssemblies.prx` (ELF `e_type` 0xFE18, no section he
 * PS4 `DT_SCE_RELA` relocations and `DT_SCE_SYMTAB` are read from `PT_SCE_DYNLIBDATA`; PS5 uses the standard tags.
 * The "dump file" prompt and the ".init_proc protected" warning are skipped for these files.
 * `Il2CppTypeDefinitionSizes` living in the read-only code segment no longer make the `MetadataRegistration` search fail.
+* Fake-signed SELF (`4F 15 3D 1D`, output of make_fself) is unwrapped in memory, no unfself step needed.
 * When LTO folded `Il2CppCodeRegistration` into code (seen in Blasphemous 2), it is reconstructed from the
   code gen module table, the generic method pointer table and the invoker table (`Utils/LtoSearch.cs`).
 

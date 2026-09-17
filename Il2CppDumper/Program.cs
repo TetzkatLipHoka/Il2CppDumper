@@ -126,6 +126,12 @@ namespace Il2CppDumper
             Console.WriteLine("Initializing il2cpp file...");
             var il2cppBytes = File.ReadAllBytes(il2cppPath);
             var il2cppMagic = BitConverter.ToUInt32(il2cppBytes, 0);
+            if (il2cppMagic == FSelf.Magic) //PS4 fake-signed SELF
+            {
+                Console.WriteLine("Unwrapping FSELF...");
+                il2cppBytes = FSelf.Unwrap(il2cppBytes);
+                il2cppMagic = BitConverter.ToUInt32(il2cppBytes, 0);
+            }
             var il2CppMemory = new MemoryStream(il2cppBytes);
             switch (il2cppMagic)
             {
