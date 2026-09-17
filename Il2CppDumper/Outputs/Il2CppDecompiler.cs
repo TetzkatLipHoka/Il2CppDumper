@@ -387,7 +387,7 @@ namespace Il2CppDumper
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("ERROR: Some errors in dumping");
+                    Console.WriteLine($"ERROR: Some errors in dumping: {e}");
                     writer.Write("/*");
                     writer.Write(e);
                     writer.Write("*/\n}\n");
