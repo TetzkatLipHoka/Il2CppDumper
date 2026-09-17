@@ -11,8 +11,7 @@ cd /d "%~dp0"
 
 for %%R in (win-x64 win-x86) do (
   echo === framework dependent %%R
-  dotnet publish Il2CppDumper\Il2CppDumper.csproj -c Release -f net10.0 -r %%R --no-self-contained -nologo -v q -o "%OUT%
-et10-%%R" || exit /b 1
+  dotnet publish Il2CppDumper\Il2CppDumper.csproj -c Release -f net10.0 -r %%R --no-self-contained -nologo -v q -o "%OUT%\net10-%%R" || exit /b 1
   echo === self-contained single file %%R
   dotnet publish Il2CppDumper\Il2CppDumper.csproj -c Release -f net10.0 -r %%R --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true -p:IncludeNativeLibrariesForSelfExtract=true -nologo -v q -o "%OUT%\%%R" || exit /b 1
 )
