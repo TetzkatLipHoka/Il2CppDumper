@@ -14,6 +14,12 @@ namespace Il2CppDumper
         private Elf64_Sym[] symbolTable;
         private Elf64_Shdr[] sectionTable;
         private Elf64_Phdr pt_dynamic;
+        private Elf64_Phdr pt_sce_dynlibdata;
+
+        // Sony PS4/PS5 PRX/eboot: no section headers. PS4 keeps relocations and symbols in PT_SCE_DYNLIBDATA with DT_SCE_* tags,
+        // PS5 uses the standard DT_RELA/DT_SYMTAB tags.
+        private bool IsSce => elfHeader.e_type == ET_SCE_DYNAMIC || elfHeader.e_type == ET_SCE_DYNEXEC;
+        private bool HasSceDynlibData => pt_sce_dynlibdata != null;
 
         public Elf64(Stream stream) : base(stream)
         {
@@ -29,6 +35,7 @@ namespace Il2CppDumper
                 FixedProgramSegment();
             }
             pt_dynamic = programSegment.First(x => x.p_type == PT_DYNAMIC);
+            pt_sce_dynlibdata = programSegment.FirstOrDefault(x => x.p_type == PT_SCE_DYNLIBDATA);
             dynamicSection = ReadClassArray<Elf64_Dyn>(pt_dynamic.p_offset, pt_dynamic.p_filesz / 16L);
             if (IsDumped)
             {
@@ -38,7 +45,7 @@ namespace Il2CppDumper
             if (!IsDumped)
             {
                 RelocationProcessing();
-                if (CheckProtection())
+                if (!IsSce && CheckProtection())
                 {
                     Console.WriteLine("ERROR: This file may be protected.");
                 }
@@ -47,6 +54,10 @@ namespace Il2CppDumper
 
         protected override bool CheckSection()
         {
+            if (IsSce)
+            {
+                return true; //PS4 files never have sections, that does not make them dumps
+            }
             try
             {
                 var names = new List<string>();
@@ -94,13 +105,27 @@ namespace Il2CppDumper
             var sectionHelper = GetSectionHelper(methodCount, typeDefinitionsCount, imageCount);
             var codeRegistration = sectionHelper.FindCodeRegistration();
             var metadataRegistration = sectionHelper.FindMetadataRegistration();
-            return AutoPlusInit(codeRegistration, metadataRegistration);
+            if (AutoPlusInit(codeRegistration, metadataRegistration))
+            {
+                return true;
+            }
+            if (elfHeader.e_machine == EM_X86_64)
+            {
+                Console.WriteLine("CodeRegistration not found in data, trying to reconstruct it (LTO)...");
+                return new LtoSearch(this, sectionHelper, imageCount).Search(metadataRegistration);
+            }
+            return false;
         }
 
         public override bool SymbolSearch()
         {
             ulong codeRegistration = 0ul;
             ulong metadataRegistration = 0ul;
+            if (IsSce || symbolTable == null)
+            {
+                Console.WriteLine("ERROR: No symbol is detected");
+                return false;
+            }
             ulong dynstrOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_STRTAB).d_un);
             foreach (var symbol in symbolTable)
             {
@@ -131,6 +156,13 @@ namespace Il2CppDumper
         {
             try
             {
+                if (HasSceDynlibData)
+                {
+                    var symtab = pt_sce_dynlibdata.p_offset + dynamicSection.First(x => x.d_tag == DT_SCE_SYMTAB).d_un;
+                    var symtabsz = dynamicSection.First(x => x.d_tag == DT_SCE_SYMTABSZ).d_un;
+                    symbolTable = ReadClassArray<Elf64_Sym>(symtab, symtabsz / 24L);
+                    return;
+                }
                 var symbolCount = 0u;
                 var hash = dynamicSection.FirstOrDefault(x => x.d_tag == DT_HASH);
                 if (hash != null)
@@ -185,8 +217,17 @@ namespace Il2CppDumper
             Console.WriteLine("Applying relocations...");
             try
             {
-                var relaOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_RELA).d_un);
-                var relaSize = dynamicSection.First(x => x.d_tag == DT_RELASZ).d_un;
+                ulong relaOffset, relaSize;
+                if (HasSceDynlibData)
+                {
+                    relaOffset = pt_sce_dynlibdata.p_offset + dynamicSection.First(x => x.d_tag == DT_SCE_RELA).d_un;
+                    relaSize = dynamicSection.First(x => x.d_tag == DT_SCE_RELASZ).d_un;
+                }
+                else
+                {
+                    relaOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_RELA).d_un);
+                    relaSize = dynamicSection.First(x => x.d_tag == DT_RELASZ).d_un;
+                }
                 var relaTable = ReadClassArray<Elf64_Rela>(relaOffset, relaSize / 24L);
                 foreach (var rela in relaTable)
                 {

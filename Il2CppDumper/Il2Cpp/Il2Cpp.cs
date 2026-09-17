@@ -157,7 +157,14 @@ namespace Il2CppDumper
                 Console.WriteLine($"Change il2cpp version to: {Version}");
                 pCodeRegistration = MapVATR<Il2CppCodeRegistration>(codeRegistration);
             }
-            pMetadataRegistration = MapVATR<Il2CppMetadataRegistration>(metadataRegistration);
+            Init(pCodeRegistration, MapVATR<Il2CppMetadataRegistration>(metadataRegistration));
+        }
+
+        // Entry point for callers that reconstructed the registration structs themselves (see LtoSearch)
+        public void Init(Il2CppCodeRegistration codeRegistration, Il2CppMetadataRegistration metadataRegistration)
+        {
+            pCodeRegistration = codeRegistration;
+            pMetadataRegistration = metadataRegistration;
             genericMethodPointers = MapVATR<ulong>(pCodeRegistration.genericMethodPointers, pCodeRegistration.genericMethodPointersCount);
             invokerPointers = MapVATR<ulong>(pCodeRegistration.invokerPointers, pCodeRegistration.invokerPointersCount);
             if (Version < 27)

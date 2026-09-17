@@ -298,16 +298,8 @@ namespace Il2CppDumper
                                 if (CheckPointerRangeDataRa(pointer))
                                 {
                                     var pointers = il2Cpp.ReadClassArray<ulong>(pointer, typeDefinitionsCount);
-                                    bool flag;
-                                    if (pointerInExec)
-                                    {
-                                        flag = CheckPointerRangeExecVa(pointers);
-                                    }
-                                    else
-                                    {
-                                        flag = CheckPointerRangeDataVa(pointers);
-                                    }
-                                    if (flag)
+                                    // typeDefinitionsSizes are constants; toolchains that keep .rodata in the code segment (PS4) put them there
+                                    if (CheckPointerRangeDataVa(pointers) || CheckPointerRangeExecVa(pointers))
                                     {
                                         return addr - il2Cpp.PointerSize * 10 - section.offset + section.address;
                                     }

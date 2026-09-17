@@ -22,7 +22,17 @@ Run `Il2CppDumper.exe` and choose the il2cpp executable file and `global-metadat
 
 The program will then generate all the output files in current working directory
 
-### Command-line
+### PlayStation 4 / 5 (this fork)
+
+Decrypted PS4/PS5 `Il2CppUserAssemblies.prx` (ELF `e_type` 0xFE18, no section headers) is loaded directly:
+
+* PS4 `DT_SCE_RELA` relocations and `DT_SCE_SYMTAB` are read from `PT_SCE_DYNLIBDATA`; PS5 uses the standard tags.
+* The "dump file" prompt and the ".init_proc protected" warning are skipped for these files.
+* `Il2CppTypeDefinitionSizes` living in the read-only code segment no longer make the `MetadataRegistration` search fail.
+* When LTO folded `Il2CppCodeRegistration` into code (seen in Blasphemous 2), it is reconstructed from the
+  code gen module table, the generic method pointer table and the invoker table (`Utils/LtoSearch.cs`).
+
+## Command-line
 
 ```
 Il2CppDumper.exe <executable-file> <global-metadata> <output-directory>

@@ -155,9 +155,15 @@
         public const int EM_X86_64 = 62;
         public const int EM_AARCH64 = 183;
 
+        //e_type (Sony PS4)
+        public const ushort ET_SCE_DYNEXEC = 0xFE10;
+        public const ushort ET_SCE_DYNAMIC = 0xFE18;
+
         //p_type
         public const int PT_LOAD = 1;
         public const int PT_DYNAMIC = 2;
+        public const int PT_SCE_DYNLIBDATA = 0x61000000;
+        public const int PT_SCE_RELRO = 0x61000010;
 
         //p_flags
         public const int PF_X = 1;
@@ -177,6 +183,11 @@
         public const int DT_INIT_ARRAY = 25;
         public const int DT_FINI_ARRAY = 26;
         public const int DT_GNU_HASH = 0x6ffffef5;
+        //d_tag (Sony PS4) - values are offsets into PT_SCE_DYNLIBDATA
+        public const long DT_SCE_RELA = 0x6100002f;
+        public const long DT_SCE_RELASZ = 0x61000031;
+        public const long DT_SCE_SYMTAB = 0x61000039;
+        public const long DT_SCE_SYMTABSZ = 0x6100003f;
 
         //sh_type
         public const uint SHT_LOUSER = 0x80000000;
