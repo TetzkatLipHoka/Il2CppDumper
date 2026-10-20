@@ -5,8 +5,8 @@
 Writes <outdir>/global-metadata.dat (found by its magic AF 1B B1 FA in the heap, size from the header) and
 <outdir>/<module>.elf: a minimal ELF64 (ET_DYN) whose PT_LOAD segments are the module's mapped regions at their
 runtime addresses. The loader strips the real ELF header, so the first page of the module is 0xCC padding.
-Then run Il2CppDumper on both with config "NoRedirectedPointer": true and answer the dump address prompt with the
-printed base (data pointers in the dump are runtime addresses; the dumper rebases RVAs and the metadata type handles).
+Then run Il2CppDumper (the fork) on both: the ELF is tagged "il2mem" in ei_pad, the dumper takes the base from the
+segment addresses itself and skips the dump-address prompt and the NoRedirectedPointer setting.
 """
 import argparse, json, mmap, os, struct
 
@@ -52,7 +52,7 @@ def write_elf(m, regions, out):
     phoff = 64
     data_start = (phoff + phnum * 56 + 0xFFF) & ~0xFFF
     with open(out, "wb") as f:
-        f.write(b"\x7fELF" + bytes([2, 1, 1, 9, 0]) + b"\0" * 7)                    # ELF64 LE, FreeBSD ABI like the PS4 files
+        f.write(b"\x7fELF" + bytes([2, 1, 1, 9, 0]) + b"il2mem\0")                  # ELF64 LE, FreeBSD ABI; ei_pad tag: the dumper takes the base from the segments, no prompt / config
         f.write(struct.pack("<HHIQQQIHHHHHH", 3, 0x3E, 1, 0, phoff, 0, 0, 64, 56, phnum, 64, 0, 0))
         off = data_start
         for r in regions:
@@ -97,7 +97,7 @@ def main():
     with open(meta, "wb") as f:
         f.write(m[off:off + size])
     print(f"{meta}: version {ver}, {size} bytes, was at 0x{r['start'] + off - r['offset']:X}")
-    print(f"\nIl2CppDumper \"{elf}\" \"{meta}\" <outdir>   (config NoRedirectedPointer=true, dump address {base:X})")
+    print(f"\nIl2CppDumper \"{elf}\" \"{meta}\" <outdir>")
 
 
 if __name__ == "__main__":

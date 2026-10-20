@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using static Il2CppDumper.ElfConstants;
 
 namespace Il2CppDumper
@@ -20,6 +21,8 @@ namespace Il2CppDumper
         // PS5 uses the standard DT_RELA/DT_SYMTAB tags.
         private bool IsSce => elfHeader.e_type == ET_SCE_DYNAMIC || elfHeader.e_type == ET_SCE_DYNEXEC;
         private bool HasSceDynlibData => pt_sce_dynlibdata != null;
+        public bool IsMemoryImage => Encoding.ASCII.GetString(elfHeader.ei_pad).TrimEnd('\0') == "il2mem"; //ps4tools/il2mem.py: segments at their runtime addresses
+        public ulong MemoryImageBase => programSegment.Where(x => x.p_type == PT_LOAD).Min(x => x.p_vaddr);
 
         public Elf64(Stream stream) : base(stream)
         {

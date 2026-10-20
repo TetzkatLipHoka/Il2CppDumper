@@ -8,7 +8,7 @@ ps4-unreal-dumper makes the memory dumps (`dump.bin` + `dump.json`).
 
 | Tool | Does |
 |---|---|
-| `il2mem.py <dumpdir>` | pulls `global-metadata.dat` and a loadable image of `Il2CppUserAssemblies.prx` out of a memory dump, so Il2CppDumper runs without touching the PKG. Run the dumper on the two outputs with `"NoRedirectedPointer": true` in config.json and the printed base as dump address, put the result in `<dumpdir>/sdk`. |
+| `il2mem.py <dumpdir>` | pulls `global-metadata.dat` and a loadable image of `Il2CppUserAssemblies.prx` out of a memory dump, so Il2CppDumper runs without touching the PKG. Run the dumper (this fork, any flavour) on the two outputs with the stock config.json and put the result in `<dumpdir>/sdk`; the ELF carries its base, so there is no dump-address prompt. |
 | `il2live.py <dumpdir> "<path>" [--host IP] [--set V]` | reads / writes a value by a path that starts at a static field. Without `--host` it resolves against the dump (offline check), with `--host` live. `--find word` or `--find 50` lists paths from every static field (`--depth`). |
 | `il2diff.py <dumpdir> a.json b.json --eq 50 77` | two dumps of one session, value before and after: every matching address, walked back to a static field and printed as an il2live path. |
 | `il2cheat.py <dumpdir> out.TLH "Name=path=value" ...` | TLH trainer from il2live paths: one StartUP injection on an `Update()` of a game class (auto-picked, `--hook Class` to choose), per cheat a flag and a value cell; every path is resolved from its static root on every frame through the il2cpp TypeInfo table, so the trainer survives restarts. `--check path` prints the hops and compares them with il2live against the dump. Needs capstone. |

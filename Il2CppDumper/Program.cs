@@ -189,7 +189,13 @@ namespace Il2CppDumper
             Console.WriteLine($"Il2Cpp Version: {il2Cpp.Version}");
             if (config.ForceDump || il2Cpp.CheckDump())
             {
-                if (il2Cpp is ElfBase elf)
+                if (il2Cpp is Elf64 { IsMemoryImage: true } mem)
+                {
+                    il2Cpp.ImageBase = mem.MemoryImageBase;
+                    il2Cpp.IsDumped = true;
+                    Console.WriteLine($"Memory image (il2mem), base {il2Cpp.ImageBase:X}");
+                }
+                else if (il2Cpp is ElfBase elf)
                 {
                     Console.WriteLine("Detected this may be a dump file.");
                     Console.WriteLine("Input il2cpp dump address or input 0 to force continue:");
