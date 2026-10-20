@@ -12,8 +12,10 @@ offsets (TypeInfo table, metadata pointer, hook AOB), so it works across session
 
 Register use in the cave: rax = current slot address, rcx/rdx = dictionary walk, r8/r9 = Type key compare
 (all saved around the cheat blocks). Flag/Val cells are TLH GetMem cells like uecheat.
-Dictionary hops: int keys and {Type=X} keys are matched at runtime; string/_guid keys fall back to the entry index
-seen in the dump (ponytail: the entry order of a Dictionary only changes on remove, documented in the comment).
+Dictionary hops: int keys, {Type=X} keys and {:Class} keys (value object of that class) are matched at runtime; an int
+key of a Dictionary<int, SomeClass> becomes {:Class} when the class is unique in the dictionary, because such type
+caches use per-session hash codes as keys. String/_guid keys fall back to the entry index seen in the dump
+(ponytail: the entry order of a Dictionary only changes on remove, documented in the comment).
 """
 import json, os, re, struct, sys
 import numpy as np
@@ -28,7 +30,8 @@ CELL = dict(float=("Single", 4, "edx", "<f"), double=("Double", 8, "rdx", "<d"),
 
 # ---- path -> hops ---------------------------------------------------------------------------------------------------
 # hop kinds: ("root", Type, static offset, field type) | ("deref",) | ("add", off) | ("index", i, elemsize, is_list)
-#            | ("key_int", value) | ("key_type", TypeDefIndex, name) | ("key_nth", n, key text) ; the final slot is the value
+#            | ("key_int", value) | ("key_type", TypeDefIndex, name) | ("key_class", TypeDefIndex, name) | ("key_nth", n, key text)
+#            the final slot is the value
 async def compile_path(res, rt, read, base, path):
     """Path -> hops. Object classes behind pointers are read from the dump (auto downcast like il2live), string/_guid
     dictionary keys are resolved to their entry index in the dump."""
@@ -68,8 +71,19 @@ async def compile_path(res, rt, read, base, path):
             elif arg.startswith("Type="):
                 kt = res.find_type(arg[5:]) or sys.exit(f"{arg}: type {arg[5:]} not in dump.cs")
                 hops.append(("key_type", kt.idx, kt.full))
+            elif arg.startswith(":"):                           # entry whose value object is of that class
+                ct = res.find_type(arg[1:]) or sys.exit(f"{arg}: class {arg[1:]} not in dump.cs")
+                hops.append(("key_class", ct.idx, ct.full))
             elif ktype in PRIM or (ktype != "string" and res.find_types(ktype) and all(x.kind == "enum" for x in res.find_types(ktype))):
                 hops.append(("key_int", int(arg, 0)))
+                if vtype not in PRIM:                           # int keys of a type cache are per-session hash codes: match the value's class instead
+                    d = await emulate(rt, read, base, hops[:-1])
+                    e = d and await emulate(rt, read, base, hops)
+                    names = e and await il2live.dict_key_names(res, rt, read, ktype, e - 0x10, vtype, d)
+                    if names and names[0].startswith(":"):
+                        ct = res.find_type(names[0][1:])
+                        hops[-1] = ("key_class", ct.idx, ct.full)
+                        print(f"  {{{arg}}} -> {{{names[0]}}} (int key is a per-session hash, the value's class is unique in the dictionary)")
             else:                                               # string / object key: entry index from the dump
                 d = await emulate(rt, read, base, hops) or sys.exit(f"{arg}: dictionary is null in the dump")
                 entries = await il2live.read_u64(read, d + 0x18)
@@ -105,7 +119,7 @@ def asm_hops(rt, hops, fail):
             if is_list:
                 code += ["mov rax, [rax+0x10]", "test rax, rax", f"jz {fail}", f"cmp dword ptr [rax+0x18], {i}", f"jle {fail}"]
             code.append(f"add rax, {0x20 + i * es:#x}")
-        elif k in ("key_int", "key_type", "key_nth"):
+        elif k in ("key_int", "key_type", "key_class", "key_nth"):
             lbl = fail.replace("_end", "") + f"_k{len(code)}"
             code += ["mov rdx, [rax+0x18]", "test rdx, rdx", f"jz {fail}", "mov ecx, dword ptr [rax+0x20]", "add rdx, 0x20"]  # entries, count
             if k == "key_nth":
@@ -114,9 +128,14 @@ def asm_hops(rt, hops, fail):
                 continue
             if k == "key_type":
                 code += ["mov r8, MetadataPtr", "mov r8, [r8]", f"add r8, {rt.td_off + h[1] * 0x58:#x}"]    # Il2CppTypeDefinition* of the key type
+            if k == "key_class":
+                code += ["mov r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]"]   # Il2CppClass* of the value class
             code += [f"{lbl}_loop:", "test ecx, ecx", f"jz {fail}"]
             if k == "key_int":
                 code += [f"cmp dword ptr [rdx+8], {h[1]}", f"je {lbl}_found"]
+            elif k == "key_class":
+                code += ["mov r9, [rdx+0x10]", "test r9, r9", f"jz {lbl}_next",                                # value object -> klass
+                         "cmp qword ptr [r9], r8", f"je {lbl}_found", f"{lbl}_next:"]
             else:
                 code += ["mov r9, [rdx+8]", "test r9, r9", f"jz {lbl}_next", "mov r9, [r9+0x10]", "test r9, r9", f"jz {lbl}_next",   # RuntimeType.type
                          "cmp qword ptr [r9], r8", f"je {lbl}_found", f"{lbl}_next:"]
@@ -156,10 +175,15 @@ async def emulate(rt, read, base, hops):
                 continue
             meta = await il2live.read_u64(read, base + rt.meta_off) if k == "key_type" else 0
             want = meta + rt.td_off + h[1] * 0x58 if k == "key_type" else h[1]
+            if k == "key_class":
+                want = await il2live.read_u64(read, await il2live.read_u64(read, base + rt.table_off) + 8 * h[1])
             for n in range(count):
                 e = entries + 0x20 + n * 0x18
                 if k == "key_int":
                     got = struct.unpack("<i", await il2live.read_(read, e + 8, 4))[0]
+                elif k == "key_class":
+                    vobj = await il2live.read_u64(read, e + 0x10)
+                    got = await il2live.read_u64(read, vobj) if vobj else 0
                 else:
                     kobj = await il2live.read_u64(read, e + 8)
                     tp = await il2live.read_u64(read, kobj + 0x10) if kobj else 0

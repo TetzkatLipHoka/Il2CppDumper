@@ -22,6 +22,7 @@ Class::field            static field of Class (root); namespace optional: Ns.Cla
 [i]                     element i of an array or List<T>
 {42} {text}             Dictionary entry by int or string key
 {Type=HealthCurrent}    Dictionary<System.Type, ...> entry by the type it stands for
+{:ManaCaster}           Dictionary<int, SomeClass> entry by the class of its value (type caches: their int keys are hash codes that change per session)
 {_guid=...} {name=...}  Dictionary entry by an identifier field of the key object
 {#3}                    Dictionary entry by index (last resort)
 :Class                  downcast (normally automatic: the object's real class is read from its klass pointer)
@@ -39,9 +40,11 @@ python il2cheat.py castle "Castlevania_PPSA35399.TLH" --game "Castlevania: Belmo
 
 Trainer notes: the hook entry uses `Section-Name` `Il2CppUserAssemblies.prx` with `Section-Protection` 5 (text segment, AOB unique inside it; uTrainer/Phoenix tags, the cheat menu PRX reads them too) and
 `ModuleBase+offset` symbols for the TypeInfo table and the metadata pointer, loaded with `mov rax, Symbol` because the
-module sits above 4 GB. Dictionary hops with int keys and `{Type=X}` keys are matched at runtime, `{_guid=...}` and
-string keys use the entry index seen in the dump (entry order only changes when something is removed from the
-dictionary). Flag/Val cells are GetMem cells addressed as `[Flag1]`, like the Unreal trainers.
+module sits above 4 GB. Dictionary hops with int keys, `{Type=X}` keys and `{:Class}` keys are matched at runtime
+(an int key of a `Dictionary<int, SomeClass>` is turned into `{:Class}` when that class is unique in the dictionary,
+because such keys are per-session hash codes), `{_guid=...}` and string keys use the entry index seen in the dump
+(entry order only changes when something is removed from the dictionary). Flag/Val cells are GetMem cells addressed
+as `[Flag1]`, like the Unreal trainers.
 
 Notes measured on real dumps (metadata v29 / v31, x64):
 

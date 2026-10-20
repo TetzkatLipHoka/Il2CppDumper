@@ -168,6 +168,7 @@ class Dump:
 class Runtime:
     def __init__(self, dump, types, module="Il2CppUserAssemblies.prx"):
         self.d, self.types = dump, types
+        self.dict_classes = {}                                      # (read source, dict addr) -> {':Class': count of values}
         m = dump.m
         i = m.find(b"\xaf\x1b\xb1\xfa")
         while not (16 <= struct.unpack_from("<I", m, i + 4)[0] <= 64 and i % 16 == 0):
@@ -488,6 +489,9 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
                     if arg.startswith("#"):
                         if n == int(arg[1:]):
                             found = e; break
+                    elif arg.startswith(":"):                   # {:Class}: the entry whose value object is of that class
+                        if await value_class(res, rt, read, e) == arg:
+                            found = e; break
                     elif arg in await dict_key_names(res, rt, read, ktype, e):
                         found = e; break
                 if found is None:
@@ -501,15 +505,41 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
 KEY_ID_FIELDS = ("_guid", "guid", "_id", "id", "_name", "name", "key", "_key", "Id", "ID", "Name")
 
 
-async def dict_key_names(res, rt, read, ktype, entry):
+async def value_class(res, rt, read, entry):
+    """':Class' of the value object of a Dictionary entry (None for null / value types). Short name when unique in dump.cs."""
+    try:
+        vobj = await read_u64(read, entry + 0x10)
+        t = await rt.object_type_live(read, vobj) if vobj else None
+    except LookupError:
+        return None
+    if not t or t.kind != "class":
+        return None
+    return ":" + (t.name if len(res.find_types(t.name)) == 1 else t.full)
+
+
+async def dict_key_names(res, rt, read, ktype, entry, vtype=None, d=None):
     """Ways to name the key of a Dictionary entry: int keys -> ['42'], string keys -> ['text'], object keys ->
-    ['_guid=abc', 'name=xyz', ...] from identifier-like string/int fields of the key object (first one is used for output)."""
+    ['_guid=abc', 'name=xyz', ...] from identifier-like string/int fields of the key object (first one is used for output).
+    With vtype/d (the dictionary object): int keys of a Dictionary<int, SomeClass> also get ':Class' of the value object,
+    first when that class is unique in the dictionary (int keys of such type caches are hash codes that change per session)."""
     if ktype == "string":
         return [await read_string(read, await read_u64(read, entry + 8))]
     kinds = {t.kind for t in res.find_types(ktype)}
     if ktype in PRIM or kinds == {"enum"}:
         fmt = PRIM.get(ktype) or PRIM.get(res.find_types(ktype)[0].enum_base, ("i", 4))
-        return [str(struct.unpack("<" + fmt[0], await read_(read, entry + 8, fmt[1]))[0])]
+        names = [str(struct.unpack("<" + fmt[0], await read_(read, entry + 8, fmt[1]))[0])]
+        if vtype and d and vtype not in PRIM and (cls := await value_class(res, rt, read, entry)):
+            key = (id(read), d)
+            if key not in rt.dict_classes:                      # ponytail: one scan per dictionary, cached for --find / il2diff
+                entries = await read_u64(read, d + 0x18)
+                count = struct.unpack("<i", await read_(read, d + 0x20, 4))[0]
+                seen = {}
+                for n in range(count):
+                    c = await value_class(res, rt, read, entries + 0x20 + n * 0x18)
+                    seen[c] = seen.get(c, 0) + 1
+                rt.dict_classes[key] = seen
+            names = [cls] + names if rt.dict_classes[key].get(cls) == 1 else names + [cls]
+        return names
     kobj = await read_u64(read, entry + 8)
     if not kobj:
         return []
@@ -662,7 +692,7 @@ async def children(res, rt, read, path, addr, ftype):
                 e = entries + 0x20 + n * 0x18
                 if not await read_u64(read, e + 0x10):
                     continue
-                names = await dict_key_names(res, rt, read, ktype, e)
+                names = await dict_key_names(res, rt, read, ktype, e, vtype, obj)
                 out.append((f"{path}{{{names[0] if names else '#%d' % n}}}", e + 0x10, vtype, 0))
         except LookupError:
             pass

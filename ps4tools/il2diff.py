@@ -136,7 +136,8 @@ class Diff:
                 d = self.owner(dicts[0])[0]
                 kt = self.rt.type_of_klass(self.a.u64(d))
                 if kt and kt.name.startswith("Dictionary"):
-                    names = await il2live.dict_key_names(self.res, self.rt, self.aread, self.dict_key_type(d), start + 0x20 + i * 0x18)
+                    ktype, vtype = self.dict_key_type(d)
+                    names = await il2live.dict_key_names(self.res, self.rt, self.aread, ktype, start + 0x20 + i * 0x18, vtype, d)
                     return ("obj", d, f"{{{names[0] if names else '#%d' % i}}}")
                 return None
             es = il2live.elem_size(self.res, elem)
@@ -166,7 +167,7 @@ class Diff:
         return ("obj", start, f".{fn}")
 
     def dict_key_type(self, d):
-        """Key type of a Dictionary object: whoever points at it tells us its declared field type."""
+        """(key type, value type) of a Dictionary object: whoever points at it tells us its declared field type."""
         for r in self.refs(d):
             ow = self.owner(r)
             if ow:
@@ -174,8 +175,8 @@ class Diff:
                 if t:
                     _, ft = self.field_name(t, r - ow[0])
                     if ft and ft.startswith("Dictionary<"):
-                        return split_generic(ft)[1][0]
-        return "int"
+                        return tuple(split_generic(ft)[1][:2])
+        return "int", None
 
     async def paths_to(self, va, max_paths):
         """Static-rooted paths that reach the value at va, shortest first."""
