@@ -594,9 +594,9 @@ async def read_cstr(read, va, n=96):
 def value_format(res, ftype):
     if ftype in PRIM:
         return PRIM[ftype][0]
-    t = res.find_type(ftype)
-    if t and t.kind == "enum":
-        return PRIM.get(t.enum_base, ("i", 4))[0]
+    ts = res.find_types(ftype)
+    if ts and all(t.kind == "enum" for t in ts):     # a short name shared by an enum and a class (Type) is a pointer
+        return PRIM.get(ts[0].enum_base, ("i", 4))[0]
     return "Q"                                       # pointers / unknown: raw qword
 
 
@@ -608,7 +608,7 @@ async def read_value(res, read, addr, ftype):
 
 
 # ---- --find: BFS from every static field ------------------------------------------------------------------------------
-async def find(res, rt, read, base, word, depth, max_paths=200):
+async def find(res, rt, read, base, word, depth, max_paths=1000):
     """Paths from static roots to fields whose name contains `word` or whose value equals it. Prints path<TAB>type<TAB>value."""
     try:
         want_val = float(word)
@@ -631,16 +631,18 @@ async def find(res, rt, read, base, word, depth, max_paths=200):
         nxt = []
         for path, addr, ftype, _ in frontier:
             await match(res, rt, read, path, addr, ftype, word, want_val, out)
-            if level == depth or len(out) >= max_paths:
+            if level == depth:
                 continue
             for child in await children(res, rt, read, path, addr, ftype):
                 if child[1] not in seen:
                     seen.add(child[1]); nxt.append(child)
         frontier = nxt
-        if not frontier or len(out) >= max_paths:
+        if not frontier:
             break
-    for line in sorted(out, key=lambda s: s.count(".")):
+    for line in sorted(out, key=lambda s: s.count("."))[:max_paths]:
         print(line)
+    if len(out) > max_paths:
+        print(f"# {len(out) - max_paths} more hits not shown, use a more specific word", file=sys.stderr)
 
 
 async def match(res, rt, read, path, addr, ftype, word, want_val, out):
@@ -651,9 +653,10 @@ async def match(res, rt, read, path, addr, ftype, word, want_val, out):
         v = struct.unpack("<" + fmt, await read_(read, addr, struct.calcsize(fmt)))[0]
     except LookupError:
         return
-    name = re.sub(r"[\[{].*", "", path.rsplit(".", 1)[-1].split("::")[-1])
-    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]   # camelCase / _snake -> words
-    if (want_val is None and word.lower() in words) or (want_val is not None and v == want_val):
+    # the word may sit in the field name or in the name of the object/struct it belongs to (Mana.CurrentValue,
+    # _currentManaStatObject.baseValue), like uecheat --find; earlier segments don't count, that would list whole components
+    segs = re.sub(r"\[[^\]]*\]", "", path).replace("::", ".").split(".")        # dictionary keys count: CurrentStats{Type=SpellManaCurrent}.baseValue
+    if (want_val is None and word.lower() in "".join(segs[-2:]).lower()) or (want_val is not None and v == want_val):
         out.append(f"{path}\t{ftype}\t{v}")
 
 
@@ -780,7 +783,7 @@ if __name__ == "__main__":
     ap.add_argument("--module", default="Il2CppUserAssemblies.prx", help="il2cpp module name (default Il2CppUserAssemblies.prx)")
     ap.add_argument("--set", help="value to write (live only)")
     ap.add_argument("--find", help="field name substring or numeric value to search from all static fields")
-    ap.add_argument("--depth", type=int, default=3, help="pointer hops for --find (default 3)")
+    ap.add_argument("--depth", type=int, default=7, help="pointer hops for --find (default 7, a few seconds on a dump)")
     a = ap.parse_args()
     if not a.path and not a.find:
         ap.error("path or --find required")
