@@ -812,17 +812,31 @@ async def children(res, rt, read, path, addr, ftype):
         except LookupError:        # stale / garbage pointer in a field that is typed as a list: nothing to walk
             return []
         es = elem_size(res, etype)
-        for i in range(min(size, 16)):
-            out.append((f"{path}[{i}]", obj + 0x20 + i * es, etype, 0))
+        ref = etype not in PRIM and not (res.find_type(etype) or Type("class", "", "", [], 0)).kind in ("struct", "enum")
+        for i in range(min(size, 4096)):                     # sparse reference arrays (Entitas _components[410]): skip nulls
+            a = obj + 0x20 + i * es
+            if ref:
+                try:
+                    if not await read_u64(read, a):
+                        continue
+                except LookupError:
+                    break
+            out.append((f"{path}[{i}]", a, etype, 0))
+            if len(out) >= 256:
+                break
         return out
     if base == "HashSet":
         try:
-            n = 0
+            elems = []
             async for e in set_slots(read, obj):
-                if n >= 256:
+                if len(elems) >= 256:
                     break
-                c = await value_class(res, rt, read, e - 8)
-                out.append((f"{path}{{{c or '#%d' % n}}}", e + 8, gargs[0], 0)); n += 1
+                elems.append((e, await value_class(res, rt, read, e - 8)))
+            counts = {}
+            for _, c in elems:
+                counts[c] = counts.get(c, 0) + 1
+            for n, (e, c) in enumerate(elems):             # {:Class} only when that class is unique in the set, else {#n}
+                out.append((f"{path}{{{c if c and counts[c] == 1 else '#%d' % n}}}", e + 8, gargs[0], 0))
         except LookupError:
             pass
         return out
