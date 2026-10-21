@@ -237,7 +237,7 @@ class Diff:
 
     async def chain(self, va):
         """Owner chain of va along the first reference each (for a hit without static root): ['Player.health', 'List<Player>[2]', ...]."""
-        out = []
+        out, seen = [], set()
         for _ in range(self.depth):
             s = await self.step_up(va)
             if not s:
@@ -247,8 +247,10 @@ class Diff:
             _, obj, piece = s
             t = self.rt.type_of_klass(self.a.u64(obj))
             out.append(f"{t.full if t else '?'}{piece} @ {obj:#x}")
-            for va in self.refs(obj):
-                if await self.step_up(va) is not None:
+            seen.add(obj)
+            for va in self.refs(obj):                       # first reference that steps up to an object not seen yet (delegates point back)
+                up = await self.step_up(va)
+                if up is not None and (up[0] == "static" or up[1] not in seen):
                     break
             else:
                 out.append("(no usable reference to this object)"); break
