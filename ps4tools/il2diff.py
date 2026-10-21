@@ -4,6 +4,8 @@
     python il2diff.py <dumpdir> a.json b.json --eq 50 77 --depth 10 --paths 3
     python il2diff.py <dumpdir> before.json after.json --changed [--same before2.json] [--class Marker]
         # no value needed: every int/float/bool/enum field of a game object that differs, then paths for the first hits
+    python il2diff.py <dumpdir> dump.json --addr 0x203f12318 [0x...]
+        # one dump, the address of the value (found with a scanner): only the backward walk to a static field
 
 Both dumps come from ps4dump.py in ONE game session (object addresses must match), <dumpdir>/sdk/dump.cs from
 Il2CppDumper. --eq A B keeps the 32-bit ints and floats that are A in the first dump and B in the second.
@@ -29,11 +31,13 @@ def as_int(v):
 
 class Diff:
     def __init__(self, dumpdir, ja, jb, depth, max_parents):
-        self.a, self.b = il2live.Dump(dumpdir, ja), il2live.Dump(dumpdir, jb)
+        self.a = il2live.Dump(dumpdir, ja)
+        self.b = il2live.Dump(dumpdir, jb) if jb and jb != ja else self.a
         self.types = il2live.parse_dump_cs(os.path.join(dumpdir, "sdk", "dump.cs"))
         self.rt = il2live.Runtime(self.a, self.types)
         self.res = il2live.Resolver(self.rt)
         self.depth, self.max_parents = depth, max_parents
+        self._refs, self._steps = None, {}
 
         async def aread(va, n):
             return self.a.read(va, n)
@@ -70,29 +74,42 @@ class Diff:
         return sorted(set(hits))
 
     # ---- object structure ---------------------------------------------------------------------------------------------
+    def index(self):
+        """Sorted index of every qword in the dump that points into a dumped region (tens of millions; one pass, a few
+        seconds), plus the sorted addresses of the qwords that are Il2CppClass pointers, i.e. object starts."""
+        if self._refs is None:
+            d = self.a
+            vals, addrs = [], []
+            for r, a in d.arrays():
+                i = np.searchsorted(d.starts, a, side="right") - 1
+                ok = (i >= 0) & (a < d.ends[np.maximum(i, 0)])
+                idx = np.nonzero(ok)[0]
+                vals.append(a[idx]); addrs.append(r["start"] + idx.astype(np.uint64) * 8)
+            vals, addrs = np.concatenate(vals), np.concatenate(addrs)
+            order = np.argsort(vals, kind="stable")
+            vals, addrs = vals[order], addrs[order]
+            self._refs = (vals, addrs, np.sort(addrs[np.isin(vals, self.klass_arr)]))
+        return self._refs
+
     def owner(self, va, maxback=0x100000):
         """(object start, klass) of the object containing va: nearest preceding qword that is an Il2CppClass pointer."""
         d = self.a
-        o = d.off(va)
-        if o is None:
+        if d.off(va) is None:
             return None
-        i = np.searchsorted(d.starts, va, side="right") - 1
-        lo = max(int(d.offs[i]), o - maxback)
-        lo += (o - lo) % 8
-        a = np.frombuffer(d.m, dtype=np.uint64, count=(o - lo) // 8 + 1, offset=lo)
-        idx = np.nonzero(np.isin(a, self.klass_arr))[0]
-        if len(idx) == 0:
+        starts = self.index()[2]
+        i = np.searchsorted(starts, np.uint64(va), side="right") - 1
+        if i < 0:
             return None
-        start = va - (len(a) - 1 - int(idx[-1])) * 8
+        start = int(starts[i])
+        if va - start > maxback or np.searchsorted(d.starts, va, side="right") != np.searchsorted(d.starts, start, side="right"):
+            return None                                      # too far back or in another region
         return start, d.u64(start)
 
     def refs(self, target):
-        pat = np.uint64(target)
-        out = []
-        for r, a in self.a.arrays():
-            for idx in np.nonzero(a == pat)[0]:
-                out.append(r["start"] + int(idx) * 8)
-        return out
+        """Addresses of every qword equal to target: binary search in the pointer index."""
+        vals, addrs, _ = self.index()
+        lo, hi = np.searchsorted(vals, np.uint64(target), side="left"), np.searchsorted(vals, np.uint64(target), side="right")
+        return [int(x) for x in addrs[lo:hi]]
 
     def static_root(self, va):
         i = np.searchsorted(self.static_starts, va, side="right") - 1
@@ -114,7 +131,12 @@ class Diff:
 
     async def step_up(self, va):
         """What holds the pointer/value at va: ('static', path) | ('obj', object start, suffix piece) | None.
-        Dictionary entries and List buffers are collapsed into {key} / [i] on the owning container."""
+        Dictionary entries and List buffers are collapsed into {key} / [i] on the owning container. Cached per address."""
+        if va not in self._steps:
+            self._steps[va] = await self._step_up(va)
+        return self._steps[va]
+
+    async def _step_up(self, va):
         root = self.static_root(va)
         if root:
             return ("static", root)
@@ -201,11 +223,35 @@ class Diff:
                 t = self.rt.type_of_klass(self.a.u64(obj))
                 if t and (t.ns.startswith(NOISE_NS) and not t.name.startswith(("List", "Dictionary", "Entry")) or t.name in NOISE_NAMES):
                     continue
-                for r in self.refs(obj)[:self.max_parents]:
-                    nxt.append((r, piece + suffix))
+                kept = 0                                     # only references that lead somewhere count against --parents:
+                for r in self.refs(obj):                     # MethodInfo/anon-region refs and unmapped generic owners are noise
+                    if kept >= self.max_parents:
+                        break
+                    if await self.step_up(r) is None:
+                        continue
+                    nxt.append((r, piece + suffix)); kept += 1
             frontier = nxt
             if not frontier:
                 break
+        return out
+
+    async def chain(self, va):
+        """Owner chain of va along the first reference each (for a hit without static root): ['Player.health', 'List<Player>[2]', ...]."""
+        out = []
+        for _ in range(self.depth):
+            s = await self.step_up(va)
+            if not s:
+                break
+            if s[0] == "static":
+                out.append(s[1]); break
+            _, obj, piece = s
+            t = self.rt.type_of_klass(self.a.u64(obj))
+            out.append(f"{t.full if t else '?'}{piece} @ {obj:#x}")
+            for va in self.refs(obj):
+                if await self.step_up(va) is not None:
+                    break
+            else:
+                out.append("(no usable reference to this object)"); break
         return out
 
     # ---- --changed: every scalar field of game objects that differs between the dumps ------------------------------------
@@ -282,6 +328,16 @@ class Diff:
 
 async def amain(a):
     diff = Diff(a.dumpdir, a.a, a.b, a.depth, a.parents)
+    if a.addr:
+        for va in a.addr:
+            va = int(va, 0)
+            paths = await diff.paths_to(va, a.paths)
+            for p in paths:
+                v = await diff.verify(p)
+                print(f"{p}	{v[0][1]}	{v[0][0]}" if v else f"# {p}: does not resolve")
+            if not paths:
+                print(f"# {va:#x}: no static root within {a.depth} hops; owner chain: " + " <- ".join(await diff.chain(va)), file=sys.stderr)
+        return
     if a.changed:
         same = il2live.Dump(a.dumpdir, a.same) if a.same else None
         rows = diff.changed(a.images.split(","), a.cls, same)
@@ -313,7 +369,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("dumpdir")
     ap.add_argument("a", help="first dump json (e.g. dump_mana_50.json)")
-    ap.add_argument("b", help="second dump json")
+    ap.add_argument("b", nargs="?", help="second dump json (not needed with --addr)")
+    ap.add_argument("--addr", nargs="+", help="address(es) of the value in the first dump: backward walk only, no scan")
     ap.add_argument("--eq", nargs=2, metavar=("A", "B"), help="value in the first and in the second dump")
     ap.add_argument("--changed", action="store_true", help="list every scalar field of game objects that differs between the dumps")
     ap.add_argument("--same", help="third dump json in which the value must still equal the first dump (filters moving values)")
@@ -324,6 +381,8 @@ if __name__ == "__main__":
     ap.add_argument("--parents", type=int, default=6, help="references followed per object (default 6)")
     ap.add_argument("--hits", type=int, default=20, help="hits to trace (default 20)")
     args = ap.parse_args()
-    if not args.eq and not args.changed:
-        ap.error("--eq A B or --changed required")
+    if not args.eq and not args.changed and not args.addr:
+        ap.error("--eq A B, --changed or --addr required")
+    if (args.eq or args.changed) and not args.b:
+        ap.error("--eq / --changed need two dumps")
     asyncio.run(amain(args))
