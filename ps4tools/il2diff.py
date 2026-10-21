@@ -355,7 +355,7 @@ async def amain(a):
     for va, kind in hits[:a.hits]:
         paths = await diff.paths_to(va, a.paths)
         if not paths:
-            print(f"# {va:#x} ({kind}): no static root within {a.depth} hops", file=sys.stderr)
+            print(f"# {va:#x} ({kind}): no static root within {a.depth} hops; owner chain: " + " <- ".join(await diff.chain(va)), file=sys.stderr)
         for p in paths:
             v = await diff.verify(p)
             if v:
