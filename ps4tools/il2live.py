@@ -37,6 +37,7 @@ MODS = {"public", "private", "internal", "protected", "static", "readonly", "con
 TYPE_RE = re.compile(r"^(?P<mods>(?:\w+\s+)*?)(?P<kind>class|struct|enum|interface)\s+(?P<name>[^\s<]+(?:<[^>]*>)?)(?:\s*:\s*(?P<bases>.*?))?\s*// TypeDefIndex: (?P<idx>\d+)")
 IMAGE_RE = re.compile(r"^// Image \d+: (?P<name>\S+) - (?P<start>\d+)")
 FIELD_RE = re.compile(r"^\t(?P<decl>.+?)(?: = (?P<val>.*?))?; // 0x(?P<off>[0-9A-Fa-f]+)$")
+METHOD_RE = re.compile(r"^\t(?P<vis>public|private|protected|internal)[\w ]*? void (?P<name>\w+)\(\) \{ \}$")   # parameterless void: hook candidates
 
 
 # ---- dump.cs ---------------------------------------------------------------------------------------------------
@@ -44,6 +45,8 @@ class Type:
     def __init__(self, kind, name, ns, bases, idx):
         self.kind, self.name, self.ns, self.bases, self.idx = kind, name, ns, bases, idx
         self.fields, self.statics, self.enum_base = {}, {}, "int"      # offset -> (type, name)
+        self.order, self.sorder = [], []                                # (type, name) in declaration order, instance / static
+        self.methods = {}                                               # parameterless void methods: name -> visibility
         self.image = ""
 
     @property
@@ -53,7 +56,7 @@ class Type:
 
 def parse_dump_cs(path):
     """-> {full name: Type}; full name = Namespace.Outer.Inner"""
-    types, ns, cur, images = {}, "", None, []
+    types, ns, cur, images, section = {}, "", None, [], "fields"
     for line in open(path, encoding="utf-8", errors="replace"):
         line = line.rstrip("\r\n")
         m = IMAGE_RE.match(line)
@@ -64,11 +67,22 @@ def parse_dump_cs(path):
         m = TYPE_RE.match(line)
         if m:
             bases = [b.strip() for b in m["bases"].split(",")] if m["bases"] else []
-            cur = Type(m["kind"], m["name"], ns, bases, int(m["idx"])); types[cur.full] = cur; continue
+            cur = Type(m["kind"], m["name"], ns, bases, int(m["idx"])); types[cur.full] = cur; section = "fields"; continue
         if cur is None:
             continue
-        if line == "}" or line.startswith("\t// Methods") or line.startswith("\t// Properties"):
+        if line == "}":
             cur = None; continue
+        if line.startswith("\t// Methods"):
+            section = "methods"; continue
+        if line.startswith("\t// Properties"):
+            section = "properties"; continue
+        if section == "methods":
+            m = METHOD_RE.match(line)
+            if m:
+                cur.methods[m["name"]] = m["vis"]
+            continue
+        if section == "properties":
+            continue
         m = FIELD_RE.match(line)
         if m:
             off = int(m["off"], 16)
@@ -83,8 +97,10 @@ def parse_dump_cs(path):
                 cur.enum_base = typ
             elif "static" in mods:
                 cur.statics[off] = (typ, name)
+                cur.sorder.append((typ, name))
             else:
                 cur.fields[off] = (typ, name)
+                cur.order.append((typ, name))
     images.sort()
     for t in types.values():
         for start, name in images:
@@ -94,7 +110,26 @@ def parse_dump_cs(path):
         base = t.name.split("<")[0]
         if base in GENERIC_LAYOUT and t.fields and all(o == 0 for o in t.fields):
             t.fields = dict(GENERIC_LAYOUT[base])
+        elif "<" in t.name:
+            if t.fields and all(o == 0 for o in t.fields):
+                t.fields = generic_layout(t.order, 0 if t.kind == "struct" else 0x10)
+            if len(t.statics) > 1 and all(o == 0 for o in t.statics):
+                t.statics = generic_layout(t.sorder, 0)
     return types
+
+
+def generic_layout(order, off):
+    """Sequential il2cpp layout for the fields of an open generic class/struct (SyncValue<T> { T _Value; Action<T>
+    OnValueChanged; }): declaration order from `off` (0x10 for class instances, 0 for structs and static blocks),
+    natural alignment, a type parameter counts as 8 bytes. Right for parameters that are pointers or <= 8 bytes
+    (float, int, double), wrong for struct parameters."""
+    out = {}
+    for typ, name in order:
+        size = PRIM[typ][1] if typ in PRIM else 8     # parameter, pointer, enum (int-sized, but 8 keeps the pointers aligned)
+        off = (off + size - 1) & ~(size - 1)
+        out[off] = (typ, name)
+        off += size
+    return out
 
 
 GENERIC_LAYOUT = {
@@ -328,12 +363,16 @@ class Runtime:
         cands = [t for t in self.types.values() if t.name.split("<")[0] == base]
         return cands[0] if cands else None
 
-    async def statics_live(self, read, base, t):
-        """Static field block of dump.cs type t in the running process: [[base + table_off] + 8 * TypeDefIndex] -> klass -> static_fields."""
+    async def statics_live(self, read, base, t, hops=0):
+        """Static field block of dump.cs type t in the running process: [[base + table_off] + 8 * TypeDefIndex] -> klass
+        -> static_fields. hops > 0: the block of the hops-th base class instead, via klass.parent (that is how the statics
+        of a generic base like MonoSingleton<Player> are reached: generic instances are not in the TypeInfo table)."""
         if self.table_off is None:
             sys.exit("TypeInfo table not found in the dump, cannot resolve static roots")
         table = await read_u64(read, base + self.table_off)
         klass = await read_u64(read, table + 8 * t.idx)
+        for _ in range(hops):
+            klass = klass and await read_u64(read, klass + KLASS_PARENT)
         if not klass:
             return None, None
         return await read_u64(read, klass + KLASS_STATICS), klass
@@ -378,6 +417,31 @@ class Resolver:
             seen.add(id(t))
             yield t
             t = self.find_type(t.bases[0], t.ns) if t.bases and t.bases[0] else None
+
+    def static_field(self, t, name):
+        """(parent hops, offset, type string, owner Type) of a static field of t or of a base class: hops = how many
+        klass.parent steps lead to the class that owns the block. A generic base's T is substituted (MonoSingleton<Player>)."""
+        declared = t.name
+        for hops, c in enumerate(self.chain(t)):
+            for off, (ft, fn) in c.statics.items():
+                if fn == name:
+                    return hops, off, self.subst(declared, c, ft), c
+            declared = c.bases[0] if c.bases else ""
+        return None
+
+    @staticmethod
+    def subst(declared, t, ft):
+        """Field type ft of generic definition t (SyncValue<T>) with the arguments of the declared use (SyncValue<float>)."""
+        params, args = split_generic(t.name)[1], split_generic(declared)[1]
+        if not params or len(params) != len(args):
+            return ft
+        m = dict(zip(params, args))
+        return re.sub(r"\b\w+\b", lambda x: m.get(x.group(0), x.group(0)), ft)
+
+    def inherited_statics(self, t):
+        """[(hops, owner Type)] for generic base classes of t that have static fields (their blocks exist per instantiation,
+        so they are only reachable through t: Player::<Instance>k__BackingField for Player : MonoSingleton<Player>)."""
+        return [(hops, c) for hops, c in enumerate(self.chain(t)) if hops and c.statics and "<" in c.name]
 
     def field(self, t, name):
         """(offset, type string, owner Type) walking base classes."""
@@ -424,17 +488,18 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
     t = res.find_type(cls_name)
     if not t:
         sys.exit(f"class {cls_name} not in dump.cs")
-    statics, k = await rt.statics_live(read, base, t)
+    hit = res.static_field(t, sname)
+    if not hit:
+        sys.exit(f"{t.full} has no static field {sname}; statics: {[fn for c in res.chain(t) for _, (_, fn) in c.statics.items()]}")
+    hops, off, ftype, owner = hit
+    statics, k = await rt.statics_live(read, base, t, hops)
     if not k:
         sys.exit(f"{t.full} is not initialized in the process yet")
     if not statics:
-        sys.exit(f"{t.full} has no static field block")
-    hit = [(o, ft) for o, (ft, fn) in t.statics.items() if fn == sname]
-    if not hit:
-        sys.exit(f"{t.full} has no static field {sname}; statics: {[fn for _, (_, fn) in t.statics.items()]}")
-    addr, ftype = statics + hit[0][0], hit[0][1]
+        sys.exit(f"{owner.full} has no static field block")
+    addr = statics + off
     if trace is not None:
-        trace.append(f"{t.full}::{sname} @ {addr:#x} ({ftype}) klass {k:#x}")
+        trace.append(f"{t.full}::{sname} @ {addr:#x} ({ftype}) klass {k:#x}" + (f" ({owner.full}, {hops} parent hops)" if hops else ""))
     cur_t = None                                     # type of the object we are inside, once dereferenced
     for op, arg in segs[1:]:
         if op == "cast":
@@ -458,7 +523,8 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
                 f = res.field(cur_t, arg)
                 if not f:
                     sys.exit(f"{cur_t.full} has no field {arg}; fields: {[fn for _, (_, fn) in cur_t.fields.items()][:30]}")
-                off, ftype, owner = f
+                off, ft, owner = f
+                ftype = res.subst(ftype, owner, ft)      # T of a generic instance -> the declared argument
                 addr = obj + off
                 if trace is not None:
                     trace.append(f".{arg} @ {addr:#x} ({ftype}) in {cur_t.full}")
@@ -617,15 +683,16 @@ async def find(res, rt, read, base, word, depth, max_paths=1000):
     out, seen = [], set()
     roots = []
     for t in res.types.values():
-        if not t.statics or t.kind != "class" or "<" in t.name:
+        if t.kind != "class" or "<" in t.name:
             continue
-        try:
-            statics, k = await rt.statics_live(read, base, t)
-        except LookupError:
-            continue
-        if statics:
-            for off, (ft, fn) in t.statics.items():
-                roots.append((f"{t.full}::{fn}", statics + off, ft, 0))
+        for hops, c in ([(0, t)] if t.statics else []) + res.inherited_statics(t):
+            try:
+                statics, k = await rt.statics_live(read, base, t, hops)
+            except LookupError:
+                continue
+            if statics:
+                for off, (ft, fn) in c.statics.items():
+                    roots.append((f"{t.full}::{fn}", statics + off, ft, 0))
     frontier = roots
     for level in range(depth + 1):
         nxt = []
@@ -705,7 +772,7 @@ async def children(res, rt, read, path, addr, ftype):
         return []
     for c in res.chain(t):
         for off, (ft, fn) in c.fields.items():
-            out.append((f"{path}.{fn}", obj + off, ft, 0))
+            out.append((f"{path}.{fn}", obj + off, res.subst(ftype, c, ft), 0))
     return out
 
 

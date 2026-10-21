@@ -16,7 +16,7 @@ Output per line: path<TAB>type<TAB>value in a<TAB>value in b, verified by resolv
 import argparse, os, struct, sys
 import numpy as np
 import il2live
-from il2live import KLASS_STATICS, PRIM, split_generic
+from il2live import KLASS_STATICS, KLASS_PARENT, PRIM, split_generic
 
 NOISE_NS = ("System", "UnityEngine", "TMPro", "Unity.", "Cinemachine")
 NOISE_NAMES = ("StatChangedArgs", "Action", "Delegate", "MulticastDelegate", "Func", "EventHandler")
@@ -45,12 +45,36 @@ class Diff:
         self.klass_arr = self.rt.klass_arr
         # static field blocks: start -> (Type, size)
         self.statics = {}
-        for k in self.rt.klasses:
+        parents = {k: self.a.u64(k + KLASS_PARENT) for k in self.rt.klasses}
+        for k, name in self.rt.klasses.items():
             sf = self.a.u64(k + KLASS_STATICS)
             t = self.rt.type_of_klass(k)
             if sf and t and t.statics:
-                self.statics[sf] = (t, max(t.statics) + 8)
+                label = t.full
+                if "`" in name:                              # generic instance (MonoSingleton`1): name the block after the class that
+                    kids = [c for c, pk in parents.items() if pk == k and "`" not in self.rt.klasses[c]]   # inherits it, Player::<Instance>
+                    arg = self.generic_arg(k)
+                    kt = [self.rt.type_of_klass(c) for c in kids]
+                    kt = [x for x in kt if x] and ([x for x in kt if x and x.full == arg] or [x for x in kt if x])
+                    if kt:
+                        label = kt[0].full
+                self.statics[sf] = (t, max(t.statics) + 8, label)
         self.static_starts = np.array(sorted(self.statics), dtype=np.uint64)
+
+    def generic_arg(self, k):
+        """dump.cs name of the first type argument of a generic instance klass (Il2CppClass.generic_class -> context ->
+        class_inst -> type_argv[0] -> typedef handle), None if it is not a class/struct."""
+        try:
+            gc = self.a.u64(k + 0x60)
+            inst = gc and self.a.u64(gc + 8)
+            argv = inst and self.a.u64(inst + 8)
+            tp = argv and self.a.u64(argv)
+            data = tp and self.a.u64(tp)
+            meta = self.a.u64(self.rt.base + self.rt.meta_off)
+            idx, rest = divmod(data - meta - self.rt.td_off, 0x58)
+            return self.rt.typedef_names.get(idx) if rest == 0 else None
+        except (TypeError, struct.error):
+            return None
 
     # ---- value scan ---------------------------------------------------------------------------------------------------
     def scan(self, va, vb):
@@ -116,12 +140,12 @@ class Diff:
         if i < 0:
             return None
         start = int(self.static_starts[i])
-        t, size = self.statics[start]
+        t, size, label = self.statics[start]
         if va >= start + size:
             return None
         off = va - start
         name = next((fn for o, (_, fn) in t.statics.items() if o == off), None)
-        return f"{t.full}::{name}" if name else None
+        return f"{label}::{name}" if name else None
 
     def field_name(self, t, off):
         for c in self.res.chain(t):

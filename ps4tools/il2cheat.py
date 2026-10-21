@@ -21,16 +21,18 @@ caches use per-session hash codes as keys. String/_guid keys fall back to the en
 import json, os, re, struct, sys
 import numpy as np
 import il2live
-from il2live import KLASS_STATICS, PRIM, split_generic, elem_size
+from il2live import KLASS_STATICS, KLASS_PARENT, PRIM, split_generic, elem_size
 
 MODULE = "Il2CppUserAssemblies.prx"
+HOOK_METHODS = ("Update", "LateUpdate", "FixedUpdate", "OnUpdate", "OnLateUpdate", "OnFixedUpdate", "Tick", "OnTick",
+                "CustomUpdate", "OnCustomUpdate", "UpdateLogic", "DoUpdate", "ManualUpdate")   # per-frame methods, preferred first
 CELL = dict(float=("Single", 4, "edx", "<f"), double=("Double", 8, "rdx", "<d"), int=("Integer", 4, "edx", "<i"), uint=("Cardinal", 4, "edx", "<I"),
             long=("Int64", 8, "rdx", "<q"), ulong=("UInt64", 8, "rdx", "<Q"), short=("SmallInt", 2, "dx", "<h"), ushort=("Word", 2, "dx", "<H"),
             byte=("Byte", 1, "dl", "<B"), sbyte=("ShortInt", 1, "dl", "<b"), bool=("Boolean", 1, "dl", "<B"))
 
 
 # ---- path -> hops ---------------------------------------------------------------------------------------------------
-# hop kinds: ("root", Type, static offset, field type) | ("deref",) | ("add", off) | ("index", i, elemsize, is_list)
+# hop kinds: ("root", Type, static offset, field type, parent hops) | ("deref",) | ("add", off) | ("index", i, elemsize, is_list)
 #            | ("key_int", value) | ("key_type", TypeDefIndex, name) | ("key_class", TypeDefIndex, name) | ("key_nth", n, key text)
 #            the final slot is the value
 async def compile_path(res, rt, read, base, path):
@@ -39,8 +41,8 @@ async def compile_path(res, rt, read, base, path):
     segs = res.tokens(path)
     _, cls_name, sname = segs[0]
     t = res.find_type(cls_name) or sys.exit(f"class {cls_name} not in dump.cs")
-    hit = [(o, ft) for o, (ft, fn) in t.statics.items() if fn == sname] or sys.exit(f"{t.full} has no static field {sname}")
-    hops, ftype, cur_t = [("root", t, hit[0][0], hit[0][1])], hit[0][1], None
+    hit = res.static_field(t, sname) or sys.exit(f"{t.full} has no static field {sname}")
+    hops, ftype, cur_t = [("root", t, hit[1], hit[2], hit[0])], hit[2], None
     for op, arg in segs[1:]:
         if op == "cast":
             cur_t = res.find_type(arg) or sys.exit(f"class {arg} not found"); continue
@@ -56,7 +58,8 @@ async def compile_path(res, rt, read, base, path):
                 if cur_t is None:
                     sys.exit(f"unknown class for field type {ftype}")
             f = res.field(cur_t, arg) or sys.exit(f"{cur_t.full} has no field {arg}")
-            off, ftype, _ = f
+            off, ft, owner = f
+            ftype = res.subst(ftype, owner, ft)
             if off:
                 hops.append(("add", off))
         elif op == "index":
@@ -106,8 +109,9 @@ def asm_hops(rt, hops, fail):
         if k == "root":
             t, off = h[1], h[2]
             code += ["movabs rax, TypeInfoTable", "mov rax, [rax]", "test rax, rax", f"jz {fail}",
-                     f"mov rax, [rax+{8 * t.idx:#x}]", "test rax, rax", f"jz {fail}",                 # Il2CppClass*
-                     f"mov rax, [rax+{KLASS_STATICS:#x}]", "test rax, rax", f"jz {fail}"]             # static field block
+                     f"mov rax, [rax+{8 * t.idx:#x}]", "test rax, rax", f"jz {fail}"]                 # Il2CppClass*
+            code += [f"mov rax, [rax+{KLASS_PARENT:#x}]", "test rax, rax", f"jz {fail}"] * h[4]       # statics of a (generic) base class
+            code += [f"mov rax, [rax+{KLASS_STATICS:#x}]", "test rax, rax", f"jz {fail}"]             # static field block
             if off:
                 code.append(f"add rax, {off:#x}")
         elif k == "deref":
@@ -152,6 +156,8 @@ async def emulate(rt, read, base, hops):
         if k == "root":
             table = await il2live.read_u64(read, base + rt.table_off)
             klass = await il2live.read_u64(read, table + 8 * h[1].idx)
+            for _ in range(h[4]):
+                klass = await il2live.read_u64(read, klass + KLASS_PARENT)
             a = await il2live.read_u64(read, klass + KLASS_STATICS) + h[2]
         elif k == "deref":
             a = await il2live.read_u64(read, a)
@@ -197,40 +203,78 @@ async def emulate(rt, read, base, hops):
 
 
 # ---- hook selection ----------------------------------------------------------------------------------------------------
-def pick_hook(rt, res, dump, script, want=None):
+def live_instances(rt, dump):
+    """{klass: number of objects} over all dumped regions. An object start is a klass pointer whose next qword is the
+    monitor (0 or a pointer outside the module) and whose fourth qword does not point into the metadata: that drops the
+    MethodInfo (klass at +0x20, return_type at +0x28 in the module), FieldInfo (klass at +0x10, offset|token after it) and
+    PropertyInfo (klass at +0, name at +0x18 in the metadata) structures; regions that hold Il2CppClass structs themselves
+    (metadata pools, full of klass refs in typeHierarchy/parent/castClass) are skipped. Region names alone do not
+    separate heap and pools on every platform (PS4: dlmalloc_extra, PS5 Unity 6: ScriptingGetMem, pools unnamed or dlmalloc)."""
+    mods = [(r["start"], r["end"]) for r in dump.regs if (r["name"] or "").endswith((".prx", ".sprx", ".elf", "eboot.bin"))]
+    meta = next((r for r in dump.regs if r["start"] <= rt.meta < r["end"]), None)
+    pools = set((np.searchsorted(dump.starts, rt.klass_arr, side="right") - 1).tolist())   # regions holding Il2CppClass structs:
+    counts = {}                                                                             # metadata pools, full of klass refs (typeHierarchy, parent...)
+    for i, (r, a) in enumerate(dump.arrays()):
+        if any(lo <= r["start"] < hi for lo, hi in mods) or r["name"] == "executable" or len(a) < 4:
+            continue
+        if dump.regs.index(r) in pools:
+            continue
+        idx = np.nonzero(np.isin(a[:-3], rt.klass_arr))[0]
+        if len(idx) == 0:
+            continue
+        mon, fourth = a[idx + 1], a[idx + 3]
+        ok = mon == 0
+        for lo, hi in mods:
+            ok |= (mon >= np.uint64(0x10000)) & ~((mon >= lo) & (mon < hi))
+        if meta:
+            ok &= ~((fourth >= meta["start"]) & (fourth < meta["end"]))
+        v, c = np.unique(a[idx[ok]], return_counts=True)
+        for k, n in zip(v.tolist(), c.tolist()):
+            counts[k] = counts.get(k, 0) + n
+    return counts
+
+
+def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",)):
     """(method name, RVA, aob bytes, site instructions) for an Update() of a game class with live instances."""
     import capstone
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     text = [r for r in dump.regs if r["name"] == rt.module and r["prot"] & 4][0]
     blob = dump.m[text["offset"]:text["offset"] + text["end"] - text["start"]]
-    counts = {}                                      # live instances: klass pointers inside the GC heap (dlmalloc regions);
-    for r, a in dump.arrays():                       # the anonymous regions hold MethodInfo/FieldInfo that also point at the class
-        if "dlmalloc" not in (r["name"] or ""):
-            continue
-        v, c = np.unique(a[np.isin(a, rt.klass_arr)], return_counts=True)
-        for k, n in zip(v.tolist(), c.tolist()):
-            counts[k] = counts.get(k, 0) + n
+    counts = live_instances(rt, dump)
+    for t in res.types.values():                     # an Update() of a base class runs for the instances of its subclasses too
+        n = sum(counts.get(k, 0) for k in rt.by_full.get(t.full, []))
+        if n:
+            for c in list(res.chain(t))[1:]:
+                for k in rt.by_full.get(c.full, []):
+                    counts[k] = counts.get(k, 0) + n
     cands = []
+    want_cls, _, want_meth = want.partition(".") if want else (None, None, None)   # --hook Class or --hook Class.Method
     for e in script["ScriptMethod"]:
         cls, _, meth = e["Name"].rpartition("$$")
-        if meth not in ("Update", "LateUpdate") or "<" in cls:
+        if (meth not in HOOK_METHODS and meth != want_meth) or "<" in cls:
             continue
-        if want and cls.split(".")[-1] != want:
+        if want and (cls.split(".")[-1] != want_cls or (want_meth and meth != want_meth)):
             continue
         t = res.find_type(cls)
-        if not t or "Assembly-CSharp" not in t.image:
+        if not t or t.image not in images:
             continue
         n = sum(counts.get(k, 0) for k in rt.by_full.get(t.full, []))
         if n:
             core = 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD", cls) else 1
-            cands.append((n != 1, core, 0 if meth == "Update" else 1, n, cls, meth, e["Address"]))
+            unity_msg = meth in ("Update", "LateUpdate", "FixedUpdate") and any(c.name == "MonoBehaviour" for c in res.chain(t))
+            if unity_msg:                                     # called by the engine through the method pointer, never inlined
+                weak = False
+            else:                                             # custom per-frame method: a private one may be inlined into its caller
+                weak = t.methods.get(meth) == "private"
+            prio = HOOK_METHODS.index(meth) if meth in HOOK_METHODS else len(HOOK_METHODS)
+            cands.append((n != 1, not unity_msg, weak, core, prio, n, cls, meth, e["Address"]))
     if want is None and os.environ.get("IL2CHEAT_LIST_HOOKS"):
         for c in sorted(cands)[:25]:
-            print(f"  candidate {c[4]}.{c[5]} instances={c[3]}", file=sys.stderr)
-    for _, _, _, n, cls, meth, rva in sorted(cands):
+            print(f"  candidate {c[6]}.{c[7]} instances={c[5]}{'' if not c[1] else ' (custom)'}{' (private)' if c[2] else ''}", file=sys.stderr)
+    for _, _, _, _, _, n, cls, meth, rva in sorted(cands):
         site, size = [], 0
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
-            if "rip" in ins.op_str:
+            if "rip" in ins.op_str or (not site and ins.mnemonic == "jmp"):    # rip-relative, or a thunk that only jumps on
                 site = None; break
             site.append(f"{ins.mnemonic} {ins.op_str}".strip()); size += ins.size
             if size >= 5:
@@ -241,7 +285,7 @@ def pick_hook(rt, res, dump, script, want=None):
             pat = bytes(blob[rva:rva + length])
             if blob.count(pat) == 1:
                 return f"{cls}.{meth}", rva, pat, site, n
-    sys.exit("no usable Update() hook (all candidates start rip-relative or have no unique AOB); try --hook Class")
+    sys.exit("no usable per-frame hook (no candidate with live instances, or all start rip-relative / have no unique AOB); try --hook Class or --hook Class.Method")
 
 
 def xml_escape(s):
@@ -267,11 +311,7 @@ async def amain(a):
         print(f"\nemulated {emu and hex(emu)} vs il2live {ref and hex(ref)} -> {'OK' if emu == ref else 'MISMATCH'}")
         return
 
-    script = json.load(open(os.path.join(a.dumpdir, "sdk", "script.json")))
-    hook, rva, aob, site, n = pick_hook(rt, res, dump, script, a.hook)
-    print(f"hook: {hook} at {a.module}+{rva:#x} ({n} live instance{'s' if n != 1 else ''}), AOB {len(aob)} bytes, site: {'; '.join(site)}")
-
-    cheats, blocks, mems = [], [], []
+    cheats, blocks, mems, images = [], [], [], {"Assembly-CSharp.dll"}   # game assemblies: Assembly-CSharp plus whatever the roots live in
     for k, spec in enumerate(a.specs, 1):
         name, rest = spec.split("=", 1)                  # the path itself may contain "=" ({Type=X}, {_guid=...})
         path, value = rest.rsplit("=", 1)
@@ -299,6 +339,11 @@ async def amain(a):
         blocks.append("\n".join(code + [f"c{k}_end:"]))
         cheats.append((name, entries))
         print(f"{name}: {path} ({ftype}) = {value}, {len(hops)} hops, offline slot {ref:#x}")
+        images.add(hops[0][1].image)
+
+    script = json.load(open(os.path.join(a.dumpdir, "sdk", "script.json")))
+    hook, rva, aob, site, n = pick_hook(rt, res, dump, script, a.hook, images)
+    print(f"hook: {hook} at {a.module}+{rva:#x} ({n} live instance{'s' if n != 1 else ''}), AOB {len(aob)} bytes, site: {'; '.join(site)}")
 
     syms = [f"RegisterSymbol( TypeInfoTable, ModuleBase+{rt.table_off:#x} )", f"RegisterSymbol( MetadataPtr, ModuleBase+{rt.meta_off:#x} )"]
     asm = "\n".join(mems + syms + ["", "pushfq", "push rax", "push rcx", "push rdx", "push r8", "push r9", ""]
@@ -332,7 +377,7 @@ if __name__ == "__main__":
     ap.add_argument("specs", nargs="*", help='"Name=path=value"')
     ap.add_argument("--json", default="dump.json")
     ap.add_argument("--module", default=MODULE)
-    ap.add_argument("--hook", help="class whose Update() is hooked (default: an Assembly-CSharp class with one live instance)")
+    ap.add_argument("--hook", help="Class or Class.Method to hook (default: an Update-like method of an Assembly-CSharp class with one live instance)")
     ap.add_argument("--game", help="game name for the TLH header (default: from the output file name)")
     ap.add_argument("--version", default="", help="game version for the TLH header, e.g. 1.00")
     ap.add_argument("--check", help="path: print the generated hops and compare the emulation with il2live")
