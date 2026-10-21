@@ -11,7 +11,8 @@ every path from the static root on every call: no addresses from the dump surviv
 offsets (TypeInfo table, metadata pointer, hook AOB), so it works across sessions and restarts.
 
 Register use in the cave: rax = current slot address, rcx/rdx = dictionary walk, r8/r9 = Type key compare
-(all saved around the cheat blocks). Flag/Val cells are TLH GetMem cells like uecheat.
+(all saved around the cheat blocks). Flag/Val cells are TLH GetMem cells like uecheat. Symbols are loaded with movabs:
+older keystone builds encode `mov rax, 0x854F3C10` as a sign-extended imm32 (0xFFFFFFFF854F3C10), movabs forces imm64.
 Dictionary hops: int keys, {Type=X} keys and {:Class} keys (value object of that class) are matched at runtime; an int
 key of a Dictionary<int, SomeClass> becomes {:Class} when the class is unique in the dictionary, because such type
 caches use per-session hash codes as keys. String/_guid keys fall back to the entry index seen in the dump
@@ -104,7 +105,7 @@ def asm_hops(rt, hops, fail):
         k = h[0]
         if k == "root":
             t, off = h[1], h[2]
-            code += ["mov rax, TypeInfoTable", "mov rax, [rax]", "test rax, rax", f"jz {fail}",
+            code += ["movabs rax, TypeInfoTable", "mov rax, [rax]", "test rax, rax", f"jz {fail}",
                      f"mov rax, [rax+{8 * t.idx:#x}]", "test rax, rax", f"jz {fail}",                 # Il2CppClass*
                      f"mov rax, [rax+{KLASS_STATICS:#x}]", "test rax, rax", f"jz {fail}"]             # static field block
             if off:
@@ -127,9 +128,9 @@ def asm_hops(rt, hops, fail):
                 code.append(f"; dictionary entry #{h[1]} = key {h[2]} in the dump, key not verified at runtime")
                 continue
             if k == "key_type":
-                code += ["mov r8, MetadataPtr", "mov r8, [r8]", f"add r8, {rt.td_off + h[1] * 0x58:#x}"]    # Il2CppTypeDefinition* of the key type
+                code += ["movabs r8, MetadataPtr", "mov r8, [r8]", f"add r8, {rt.td_off + h[1] * 0x58:#x}"]    # Il2CppTypeDefinition* of the key type
             if k == "key_class":
-                code += ["mov r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]"]   # Il2CppClass* of the value class
+                code += ["movabs r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]"]   # Il2CppClass* of the value class
             code += [f"{lbl}_loop:", "test ecx, ecx", f"jz {fail}"]
             if k == "key_int":
                 code += [f"cmp dword ptr [rdx+8], {h[1]}", f"je {lbl}_found"]

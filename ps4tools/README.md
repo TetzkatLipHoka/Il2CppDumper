@@ -39,8 +39,8 @@ python il2cheat.py castle "Castlevania_PPSA35399.TLH" --game "Castlevania: Belmo
 ```
 
 Trainer notes: the hook entry uses `Section-Name` `Il2CppUserAssemblies.prx` with `Section-Protection` 5 (text segment, AOB unique inside it; uTrainer/Phoenix tags, the cheat menu PRX reads them too) and
-`ModuleBase+offset` symbols for the TypeInfo table and the metadata pointer, loaded with `mov rax, Symbol` because the
-module sits above 4 GB. Dictionary hops with int keys, `{Type=X}` keys and `{:Class}` keys are matched at runtime
+`ModuleBase+offset` symbols for the TypeInfo table and the metadata pointer, loaded with `movabs rax, Symbol` (a plain
+`mov` with an address above 0x7FFFFFFF is sign-extended by older keystone builds, movabs forces the 64-bit immediate). Dictionary hops with int keys, `{Type=X}` keys and `{:Class}` keys are matched at runtime
 (an int key of a `Dictionary<int, SomeClass>` is turned into `{:Class}` when that class is unique in the dictionary,
 because such keys are per-session hash codes), `{_guid=...}` and string keys use the entry index seen in the dump
 (entry order only changes when something is removed from the dictionary). Flag/Val cells are GetMem cells addressed
