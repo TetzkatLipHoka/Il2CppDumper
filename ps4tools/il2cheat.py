@@ -270,7 +270,7 @@ def live_instances(rt, dump):
     return counts
 
 
-def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",)):
+def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",), roots=()):
     """(method name, RVA, aob bytes, site instructions) for an Update() of a game class with live instances."""
     import capstone
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
@@ -303,11 +303,11 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",))
             else:                                             # custom per-frame method: a private one may be inlined into its caller
                 weak = t.methods.get(meth) == "private"
             prio = HOOK_METHODS.index(meth) if meth in HOOK_METHODS else len(HOOK_METHODS)
-            cands.append((n != 1, not unity_msg, weak, core, prio, n, cls, meth, e["Address"]))
+            cands.append((n != 1, t.full not in roots, not unity_msg, weak, core, prio, n, cls, meth, e["Address"]))   # a root class of the paths first
     if want is None and os.environ.get("IL2CHEAT_LIST_HOOKS"):
         for c in sorted(cands)[:25]:
-            print(f"  candidate {c[6]}.{c[7]} instances={c[5]}{'' if not c[1] else ' (custom)'}{' (private)' if c[2] else ''}", file=sys.stderr)
-    for _, _, _, _, _, n, cls, meth, rva in sorted(cands):
+            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[2] else ' (custom)'}{' (private)' if c[3] else ''}", file=sys.stderr)
+    for _, _, _, _, _, _, n, cls, meth, rva in sorted(cands):
         site, size = [], 0
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
             if "rip" in ins.op_str or (not site and ins.mnemonic == "jmp"):    # rip-relative, or a thunk that only jumps on
@@ -347,7 +347,7 @@ async def amain(a):
         print(f"\nemulated {emu and hex(emu)} vs il2live {ref and hex(ref)} -> {'OK' if emu == ref else 'MISMATCH'}")
         return
 
-    cheats, blocks, mems, images = [], [], [], {"Assembly-CSharp.dll"}   # game assemblies: Assembly-CSharp plus whatever the roots live in
+    cheats, blocks, mems, images, roots = [], [], [], {"Assembly-CSharp.dll"}, set()   # game assemblies: Assembly-CSharp plus whatever the roots live in
     for k, spec in enumerate(a.specs, 1):
         name, rest = spec.split("=", 1)                  # the path itself may contain "=" ({Type=X}, {_guid=...})
         path, value = rest.rsplit("=", 1)
@@ -375,10 +375,10 @@ async def amain(a):
         blocks.append("\n".join(code + [f"c{k}_end:"]))
         cheats.append((name, entries))
         print(f"{name}: {path} ({ftype}) = {value}, {len(hops)} hops, offline slot {ref:#x}")
-        images.add(hops[0][1].image)
+        images.add(hops[0][1].image); roots.add(hops[0][1].full)
 
     script = json.load(open(os.path.join(a.dumpdir, "sdk", "script.json")))
-    hook, rva, aob, site, n = pick_hook(rt, res, dump, script, a.hook, images)
+    hook, rva, aob, site, n = pick_hook(rt, res, dump, script, a.hook, images, roots)
     print(f"hook: {hook} at {a.module}+{rva:#x} ({n} live instance{'s' if n != 1 else ''}), AOB {len(aob)} bytes, site: {'; '.join(site)}")
 
     syms = [f"RegisterSymbol( TypeInfoTable, ModuleBase+{rt.table_off:#x} )", f"RegisterSymbol( MetadataPtr, ModuleBase+{rt.meta_off:#x} )"]
