@@ -680,7 +680,7 @@ async def find(res, rt, read, base, word, depth, max_paths=1000):
         want_val = float(word)
     except ValueError:
         want_val = None
-    out, seen = [], set()
+    out, seen = [], {}                               # field address -> did the path to it already contain the word
     roots = []
     for t in res.types.values():
         if t.kind != "class" or "<" in t.name:
@@ -701,30 +701,49 @@ async def find(res, rt, read, base, word, depth, max_paths=1000):
             if level == depth:
                 continue
             for child in await children(res, rt, read, path, addr, ftype):
-                if child[1] not in seen:
-                    seen.add(child[1]); nxt.append(child)
+                named = want_val is None and any(word_in(word, sg) for sg in re.sub(r"\[[^\]]*\]", "", child[0]).replace("::", ".").split(".")[1:])
+                if child[1] not in seen or (named and not seen[child[1]]):   # an object reached again through a path that
+                    seen[child[1]] = named; nxt.append(child)                # carries the word is walked once more (MainActor.*)
         frontier = nxt
         if not frontier:
             break
-    for line in sorted(out, key=lambda s: s.count("."))[:max_paths]:
-        print(line)
+    for _, line in sorted(out, key=lambda h: (h[0], h[1].count(".")))[:max_paths]:   # word in the field name first, then
+        print(line)                                                                  # in its parent, ... ; shallow paths first
     if len(out) > max_paths:
         print(f"# {len(out) - max_paths} more hits not shown, use a more specific word", file=sys.stderr)
 
 
+def word_in(word, seg):
+    """The search word equals one or several consecutive camelCase / snake_case tokens of the segment: "mana" matches
+    manaRegen, SpellManaCurrent and {:ManaCaster} but not SettingsManager; "mainactor" matches MainActor, "hp" matches _HpValue."""
+    toks = [t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", seg)]
+    w = word.lower()
+    return any(w == "".join(toks[i:j]) for i in range(len(toks)) for j in range(i + 1, min(i + 5, len(toks) + 1)))
+
+
 async def match(res, rt, read, path, addr, ftype, word, want_val, out):
+    """Hit if the word is in any path segment after the root class (field names, object names, dictionary keys: both
+    MainActor._ActorModel.HP._Value and CurrentStats{Type=SpellManaCurrent}.baseValue match "mana"/"mainactor"), or if the
+    value equals the number given. Numbers/bools are listed with their value, an object field that matches by name
+    with its class and address."""
     fmt = value_format(res, ftype)
-    if fmt == "Q":
-        return
     try:
         v = struct.unpack("<" + fmt, await read_(read, addr, struct.calcsize(fmt)))[0]
     except LookupError:
         return
-    # the word may sit in the field name or in the name of the object/struct it belongs to (Mana.CurrentValue,
-    # _currentManaStatObject.baseValue), like uecheat --find; earlier segments don't count, that would list whole components
-    segs = re.sub(r"\[[^\]]*\]", "", path).replace("::", ".").split(".")        # dictionary keys count: CurrentStats{Type=SpellManaCurrent}.baseValue
-    if (want_val is None and word.lower() in "".join(segs[-2:]).lower()) or (want_val is not None and v == want_val):
-        out.append(f"{path}\t{ftype}\t{v}")
+    segs = re.sub(r"\[[^\]]*\]", "", path).replace("::", ".").split(".")[1:]     # [1:]: GameStateManager must not match "mana"
+    if want_val is not None:
+        if fmt != "Q" and v == want_val:
+            out.append((0, f"{path}	{ftype}	{v}"))
+        return
+    where = [i for i, sg in enumerate(reversed(segs)) if word_in(word, sg)]       # 0 = field name, 1 = its parent, ...
+    if not where:
+        return
+    if fmt != "Q":
+        out.append((where[0], f"{path}	{ftype}	{v}"))
+    elif where[0] == 0 and v:                                                      # the object itself: class and address
+        t = await rt.object_type_live(read, v)
+        out.append((0, f"{path}	{t.full if t else ftype}	{v:#x}"))
 
 
 async def children(res, rt, read, path, addr, ftype):
