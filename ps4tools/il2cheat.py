@@ -68,8 +68,18 @@ async def compile_path(res, rt, read, base, path):
             hops += [("deref",), ("index", i, elem_size(res, etype), base_name == "List")]
             ftype = etype
         elif op == "key":
-            ktype, vtype = gargs
             hops.append(("deref",))
+            if base_name == "HashSet":
+                if arg.startswith("#"):
+                    hops.append(("set_nth", int(arg[1:])))
+                elif arg.startswith(":"):
+                    ct = res.find_type(arg[1:]) or sys.exit(f"{arg}: class {arg[1:]} not in dump.cs")
+                    hops.append(("set_class", ct.idx, ct.full))
+                else:
+                    sys.exit(f"{arg}: a HashSet element is addressed as {{#n}} or {{:Class}}")
+                ftype = gargs[0]
+                continue
+            ktype, vtype = gargs
             if arg.startswith("#"):
                 hops.append(("key_nth", int(arg[1:]), arg))
             elif arg.startswith("Type="):
@@ -124,6 +134,19 @@ def asm_hops(rt, hops, fail):
             if is_list:
                 code += ["mov rax, [rax+0x10]", "test rax, rax", f"jz {fail}", f"cmp dword ptr [rax+0x18], {i}", f"jle {fail}"]
             code.append(f"add rax, {0x20 + i * es:#x}")
+        elif k in ("set_nth", "set_class"):                  # HashSet<T>: walk the used slots (hashCode >= 0), 0x10 bytes each
+            lbl = fail.replace("_end", "") + f"_s{len(code)}"
+            code += ["mov rdx, [rax+0x18]", "test rdx, rdx", f"jz {fail}", "mov ecx, dword ptr [rdx+0x18]", "add rdx, 0x20"]  # slots, length
+            if k == "set_nth":
+                code += [f"mov r8d, {h[1]}"]
+            else:
+                code += ["movabs r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]"]
+            code += [f"{lbl}_loop:", "test ecx, ecx", f"jz {fail}", "cmp dword ptr [rdx], 0", f"jl {lbl}_next"]
+            if k == "set_nth":
+                code += ["test r8d, r8d", f"jz {lbl}_found", "dec r8d"]
+            else:
+                code += ["mov r9, [rdx+8]", "test r9, r9", f"jz {lbl}_next", "cmp qword ptr [r9], r8", f"je {lbl}_found"]
+            code += [f"{lbl}_next:", "add rdx, 0x10", "dec ecx", f"jmp {lbl}_loop", f"{lbl}_found:", "lea rax, [rdx+8]"]
         elif k in ("key_int", "key_type", "key_class", "key_nth"):
             lbl = fail.replace("_end", "") + f"_k{len(code)}"
             code += ["mov rdx, [rax+0x18]", "test rdx, rdx", f"jz {fail}", "mov ecx, dword ptr [rax+0x20]", "add rdx, 0x20"]  # entries, count
@@ -174,6 +197,19 @@ async def emulate(rt, read, base, hops):
                 if not a or struct.unpack("<i", await il2live.read_(read, a + 0x18, 4))[0] <= i:
                     return None
             a += 0x20 + i * es
+        elif k in ("set_nth", "set_class"):
+            want = h[1] if k == "set_nth" else await il2live.read_u64(read, await il2live.read_u64(read, base + rt.table_off) + 8 * h[1])
+            n, a = 0, a
+            async for e in il2live.set_slots(read, a):
+                if k == "set_nth" and n == want:
+                    a = e + 8; break
+                if k == "set_class":
+                    vobj = await il2live.read_u64(read, e + 8)
+                    if vobj and await il2live.read_u64(read, vobj) == want:
+                        a = e + 8; break
+                n += 1
+            else:
+                return None
         else:
             entries = await il2live.read_u64(read, a + 0x18)
             count = struct.unpack("<i", await il2live.read_(read, a + 0x20, 4))[0]

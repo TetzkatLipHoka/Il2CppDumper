@@ -172,6 +172,16 @@ class Diff:
         if name.endswith("[]"):                                  # Il2CppArray, elements from 0x20
             elem = name[:-2]
             length = self.a.u64(start + 0x18) or 0
+            if elem == "Slot":                                   # HashSet<T>.Slot[]: {hash, next, value@8}, 0x10 bytes
+                i, rest = divmod(va - start - 0x20, 0x10)
+                if rest != 8 or i >= length:
+                    return None
+                sets = [r for r in self.refs(start) if (o := self.owner(r)) and r - o[0] == 0x18]
+                if not sets:
+                    return None
+                hs = self.owner(sets[0])[0]
+                names = await il2live.set_elem_names(self.res, self.rt, self.aread, hs, va - 8)
+                return ("obj", hs, f"{{{names[0]}}}") if names else None
             if elem == "Entry":                                  # Dictionary<K,V>.Entry[]: {hash, next, key@8, value@0x10}
                 i, rest = divmod(va - start - 0x20, 0x18)
                 if rest != 0x10 or i >= length:
@@ -245,7 +255,7 @@ class Diff:
                     continue
                 seen.add(obj)
                 t = self.rt.type_of_klass(self.a.u64(obj))
-                if t and (t.ns.startswith(NOISE_NS) and not t.name.startswith(("List", "Dictionary", "Entry")) or t.name in NOISE_NAMES):
+                if t and (t.ns.startswith(NOISE_NS) and not t.name.startswith(("List", "Dictionary", "Entry", "HashSet", "Slot")) or t.name in NOISE_NAMES):
                     continue
                 kept = 0                                     # only references that lead somewhere count against --parents:
                 for r in self.refs(obj):                     # MethodInfo/anon-region refs and unmapped generic owners are noise

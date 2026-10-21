@@ -321,7 +321,12 @@ class Runtime:
         """dump.cs Type for a runtime class (generic instances map to their open definition). Cached: called per object."""
         if k in self._type_cache:
             return self._type_cache[k]
-        full = self.full_name(k)
+        t = self.type_of_name(self.full_name(k))
+        self._type_cache[k] = t
+        return t
+
+    def type_of_name(self, full):
+        """dump.cs Type for a runtime class name (Entitas.Context`1 -> Entitas.Context<TEntity>, same generic arity preferred)."""
         t = self.types.get(full)
         if t is None:
             short = full.split(".")[-1]
@@ -331,8 +336,9 @@ class Runtime:
                 for x in self.types.values():
                     self._by_base.setdefault(x.name.split("<")[0], []).append(x)
             cands = self._by_base.get(base) or [x for x in self.types.values() if x.name == short]
-            t = cands[0] if cands else None
-        self._type_cache[k] = t
+            arity = int(short.split("`")[1]) if "`" in short and short.split("`")[1].isdigit() else 0
+            fit = [x for x in cands if len(split_generic(x.name)[1]) == arity]     # Context`1 -> Context<TEntity>, not SimpleCollator.Context
+            t = (fit or cands)[0] if cands else None
         return t
 
     def object_type(self, obj):
@@ -357,11 +363,7 @@ class Runtime:
             full = await self.full_name_live(read, k)
         except LookupError:
             return None
-        if full in self.types:
-            return self.types[full]
-        base = split_generic(full.split(".")[-1])[0].split("`")[0]
-        cands = [t for t in self.types.values() if t.name.split("<")[0] == base]
-        return cands[0] if cands else None
+        return self.type_of_name(full)
 
     async def statics_live(self, read, base, t, hops=0):
         """Static field block of dump.cs type t in the running process: [[base + table_off] + 8 * TypeDefIndex] -> klass
@@ -391,12 +393,14 @@ class Resolver:
         self.cache = {}
 
     def find_types(self, name):
-        base = split_generic(name)[0]
+        """Candidates for a (short or full) type name, same generic arity first: Context<GameEntity> -> Entitas.Context<TEntity>
+        before SimpleCollator.Context."""
+        base, args = split_generic(name)
         seen, out = set(), []
         for t in (self.types.get(name), self.types.get(base), *self.by_base.get(base, [])):
             if t is not None and id(t) not in seen:
                 seen.add(id(t)); out.append(t)
-        return out
+        return sorted(out, key=lambda t: len(split_generic(t.name)[1]) != len(args))
 
     def find_type(self, name, hint_ns=""):
         key = (name, hint_ns)
@@ -405,8 +409,10 @@ class Resolver:
         t = self.types.get(name) or (self.types.get(f"{hint_ns}.{name}") if hint_ns else None)
         if t is None:
             cands = self.find_types(name)
-            same = [c for c in cands if c.ns == hint_ns]
-            t = (same or cands)[0] if cands else None
+            arity = len(split_generic(name)[1])
+            fit = [c for c in cands if len(split_generic(c.name)[1]) == arity]      # Context<GameEntity> -> Context<TEntity>, not SimpleCollator.Context
+            same = [c for c in fit if c.ns == hint_ns]
+            t = (same or fit or cands)[0] if cands else None
         self.cache[key] = t
         return t
 
@@ -545,6 +551,18 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
                 if trace is not None:
                     trace.append(f"[{i}] @ {addr:#x} ({etype}, {size} elements)")
                 continue
+            if op == "key" and base == "HashSet":
+                n = 0
+                async for e in set_slots(read, obj):
+                    if (arg.startswith("#") and n == int(arg[1:])) or (arg.startswith(":") and await value_class(res, rt, read, e - 8) == arg):
+                        break
+                    n += 1
+                else:
+                    return None, f"element {arg} not in set"
+                addr, ftype = e + 8, gargs[0]
+                if trace is not None:
+                    trace.append(f"{{{arg}}} @ {addr:#x} ({ftype}, set element {n})")
+                continue
             if op == "key":
                 ktype, vtype = gargs[0], gargs[1]
                 entries = await read_u64(read, obj + 0x18)
@@ -569,6 +587,31 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
 
 
 KEY_ID_FIELDS = ("_guid", "guid", "_id", "id", "_name", "name", "key", "_key", "Id", "ID", "Name")
+
+
+async def set_slots(read, hs):
+    """Used slots of a HashSet<T> (address of each 0x10-byte slot: int hashCode, int next, T value @ +8; free slots have hashCode < 0)."""
+    slots = await read_u64(read, hs + 0x18)
+    n = struct.unpack("<i", await read_(read, slots + 0x18, 4))[0] if slots else 0
+    for i in range(min(n, 1 << 20)):
+        e = slots + 0x20 + i * 0x10
+        if struct.unpack("<i", await read_(read, e, 4))[0] >= 0:
+            yield e
+
+
+async def set_elem_names(res, rt, read, hs, slot):
+    """Names of a HashSet element at `slot`: ':Class' first when that class is unique in the set, then '#n' (n-th used slot)."""
+    n, classes, mine = 0, {}, None
+    async for e in set_slots(read, hs):
+        c = await value_class(res, rt, read, e - 8)
+        classes[c] = classes.get(c, 0) + 1
+        if e == slot:
+            mine = (n, c)
+        n += 1
+    if mine is None:
+        return []
+    n, c = mine
+    return ([c] if c and classes[c] == 1 else []) + [f"#{n}"]
 
 
 async def value_class(res, rt, read, entry):
@@ -771,6 +814,17 @@ async def children(res, rt, read, path, addr, ftype):
         es = elem_size(res, etype)
         for i in range(min(size, 16)):
             out.append((f"{path}[{i}]", obj + 0x20 + i * es, etype, 0))
+        return out
+    if base == "HashSet":
+        try:
+            n = 0
+            async for e in set_slots(read, obj):
+                if n >= 256:
+                    break
+                c = await value_class(res, rt, read, e - 8)
+                out.append((f"{path}{{{c or '#%d' % n}}}", e + 8, gargs[0], 0)); n += 1
+        except LookupError:
+            pass
         return out
     if base == "Dictionary":
         ktype, vtype = gargs

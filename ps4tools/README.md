@@ -28,6 +28,7 @@ Class::field            static field of Class (root); namespace optional: Ns.Cla
 {:ManaCaster}           Dictionary<int, SomeClass> entry by the class of its value (type caches: their int keys are hash codes that change per session)
 {_guid=...} {name=...}  Dictionary entry by an identifier field of the key object
 {#3}                    Dictionary entry by index (last resort)
+{:GameEntity} {#0}      HashSet<T> element by the class of the element (when unique in the set) or by position among the used slots
 :Class                  downcast (normally automatic: the object's real class is read from its klass pointer)
 ```
 
@@ -57,7 +58,8 @@ Notes measured on real dumps (metadata v29 / v31, x64):
   alignment, a type parameter as 8 bytes (`SyncValue<T>`: `_Value` 0x10, `OnValueChanged` 0x18; wrong for struct parameters)
 * statics of a generic base (`Player : MonoSingleton<Player>`) are reached as `TypeInfo[idx(Player)].parent.static_fields`,
   the generic instance class itself is not in the TypeInfo table
-* arrays: elements from 0x20; `List<T>`: `_items` 0x10, `_size` 0x18; `Dictionary<K,V>`: `_entries` 0x18, `_count` 0x20, entry = {int hash, int next, key @8, value @0x10}
+* arrays: elements from 0x20; `List<T>`: `_items` 0x10, `_size` 0x18; `Dictionary<K,V>`: `_entries` 0x18, `_count` 0x20, entry = {int hash, int next, key @8, value @0x10}; `HashSet<T>`: `_slots` 0x18, `_count` 0x20, slot = {int hash, int next, value @8} (0x10 bytes, free slots have hash < 0)
+* Entitas games (Cat Quest III): entities live in `HashSet` fields of contexts and groups, the player is `SomeManager::_instance.playerEntities._entities{:GameEntity}` or `Contexts::_sharedInstance.<game>k__BackingField._groupsForIndex[i][0]._entities{#0}`, components by index: `._components[57].value`
 * static roots and classes are resolved in the running process through the il2cpp TypeInfo table, so the dump may come from an earlier session of the same build; instance addresses in `--eq`/`--changed` output are only valid for the session the dumps came from
 * the first run on a dump builds `<dump>.bin.klasses.json` (about a minute), later runs take seconds
 * values shown on screen are not always the stored ones (a marker counter showed 5 while the list had 11 entries): when `--eq` finds nothing, use `--find` by name or `--changed`
