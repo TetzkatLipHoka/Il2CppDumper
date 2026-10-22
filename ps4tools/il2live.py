@@ -204,6 +204,7 @@ class Runtime:
     def __init__(self, dump, types, module="Il2CppUserAssemblies.prx"):
         self.d, self.types = dump, types
         self.dict_classes = {}                                      # (read source, dict addr) -> {':Class': count of values}
+        self._name_cache = {}                                       # runtime class name -> dump.cs Type
         m = dump.m
         i = m.find(b"\xaf\x1b\xb1\xfa")
         while not (16 <= struct.unpack_from("<I", m, i + 4)[0] <= 64 and i % 16 == 0):
@@ -327,6 +328,8 @@ class Runtime:
 
     def type_of_name(self, full):
         """dump.cs Type for a runtime class name (Entitas.Context`1 -> Entitas.Context<TEntity>, same generic arity preferred)."""
+        if full in self._name_cache:
+            return self._name_cache[full]
         t = self.types.get(full)
         if t is None:
             short = full.split(".")[-1]
@@ -339,6 +342,7 @@ class Runtime:
             arity = int(short.split("`")[1]) if "`" in short and short.split("`")[1].isdigit() else 0
             fit = [x for x in cands if len(split_generic(x.name)[1]) == arity]     # Context`1 -> Context<TEntity>, not SimpleCollator.Context
             t = (fit or cands)[0] if cands else None
+        self._name_cache[full] = t
         return t
 
     def object_type(self, obj):
@@ -717,8 +721,9 @@ async def read_value(res, read, addr, ftype):
 
 
 # ---- --find: BFS from every static field ------------------------------------------------------------------------------
-async def find(res, rt, read, base, word, depth, max_paths=1000):
-    """Paths from static roots to fields whose name contains `word` or whose value equals it. Prints path<TAB>type<TAB>value."""
+async def find(res, rt, read, base, word, depth, max_paths=1000, types=None, objects=False):
+    """Paths from static roots to fields whose name contains `word` or whose value equals it. Prints path<TAB>type<TAB>value.
+    types: only fields of these type names (int, float, ...); objects: also list matching object fields with class and address."""
     try:
         want_val = float(word)
     except ValueError:
@@ -740,7 +745,7 @@ async def find(res, rt, read, base, word, depth, max_paths=1000):
     for level in range(depth + 1):
         nxt = []
         for path, addr, ftype, _ in frontier:
-            await match(res, rt, read, path, addr, ftype, word, want_val, out)
+            await match(res, rt, read, path, addr, ftype, word, want_val, out, types, objects)
             if level == depth:
                 continue
             for child in await children(res, rt, read, path, addr, ftype):
@@ -756,20 +761,31 @@ async def find(res, rt, read, base, word, depth, max_paths=1000):
         print(f"# {len(out) - max_paths} more hits not shown, use a more specific word", file=sys.stderr)
 
 
+TOKEN_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_word_cache = {}
+
+
 def word_in(word, seg):
     """The search word equals one or several consecutive camelCase / snake_case tokens of the segment: "mana" matches
-    manaRegen, SpellManaCurrent and {:ManaCaster} but not SettingsManager; "mainactor" matches MainActor, "hp" matches _HpValue."""
-    toks = [t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", seg)]
-    w = word.lower()
-    return any(w == "".join(toks[i:j]) for i in range(len(toks)) for j in range(i + 1, min(i + 5, len(toks) + 1)))
+    manaRegen, SpellManaCurrent and {:ManaCaster} but not SettingsManager; "mainactor" matches MainActor, "hp" matches _HpValue.
+    Memoized: --find asks this millions of times for a few thousand distinct segments."""
+    key = (word, seg)
+    hit = _word_cache.get(key)
+    if hit is None:
+        toks = [t.lower() for t in TOKEN_RE.findall(seg)]
+        w = word.lower()
+        hit = _word_cache[key] = any(w == "".join(toks[i:j]) for i in range(len(toks)) for j in range(i + 1, min(i + 5, len(toks) + 1)))
+    return hit
 
 
-async def match(res, rt, read, path, addr, ftype, word, want_val, out):
+async def match(res, rt, read, path, addr, ftype, word, want_val, out, types=None, objects=False):
     """Hit if the word is in any path segment after the root class (field names, object names, dictionary keys: both
     MainActor._ActorModel.HP._Value and CurrentStats{Type=SpellManaCurrent}.baseValue match "mana"/"mainactor"), or if the
     value equals the number given. Numbers/bools are listed with their value, an object field that matches by name
     with its class and address."""
     fmt = value_format(res, ftype)
+    if (fmt == "Q" and not objects) or (types and ftype not in types):
+        return
     try:
         v = struct.unpack("<" + fmt, await read_(read, addr, struct.calcsize(fmt)))[0]
     except LookupError:
@@ -908,7 +924,7 @@ async def amain(a):
             return dump.read(va, n)
 
     if a.find:
-        await find(res, rt, read, base, a.find, a.depth)
+        await find(res, rt, read, base, a.find, a.depth, types=set(a.types.split(",")) if a.types else None, objects=a.objects)
         return
     trace = []
     addr, ftype = await follow(res, rt, read, base, a.path, trace=trace)
@@ -918,6 +934,22 @@ async def amain(a):
         sys.exit(f"path ends early: {ftype}")
     val = await read_value(res, read, addr, ftype)
     print(f"{a.path}\t{ftype}\t{val}\t@ {addr:#x}")
+    if a.fields:                                          # the fields of the object the path points to (or contains)
+        obj = addr if value_format(res, ftype) != "Q" else await read_u64(read, addr)
+        t = await rt.object_type_live(read, obj) if obj else None
+        if not t:
+            sys.exit(f"{ftype} is not an object")
+        for c in res.chain(t):
+            for off, (ft, fn) in sorted(c.fields.items()):
+                ft = res.subst(ftype, c, ft)
+                try:
+                    v = await read_value(res, read, obj + off, ft)
+                    if value_format(res, ft) == "Q" and int(v, 16):
+                        vt = await rt.object_type_live(read, int(v, 16))
+                        v = f"{v} ({vt.full})" if vt else v
+                except LookupError:
+                    v = "?"
+                print(f"  .{fn}\t{ft}\t{v}\t@ {obj + off:#x}")
     if a.set is not None:
         if not a.host:
             sys.exit("--set needs --host (writing into a dump file makes no sense)")
@@ -938,6 +970,9 @@ if __name__ == "__main__":
     ap.add_argument("--set", help="value to write (live only)")
     ap.add_argument("--find", help="field name substring or numeric value to search from all static fields")
     ap.add_argument("--depth", type=int, default=7, help="pointer hops for --find (default 7, a few seconds on a dump)")
+    ap.add_argument("--types", help="--find: only fields of these types, comma separated (e.g. int,float,double)")
+    ap.add_argument("--objects", action="store_true", help="--find: also list matching object fields with class and address")
+    ap.add_argument("--fields", action="store_true", help="path: also list every field of the object the path points to, with values")
     a = ap.parse_args()
     if not a.path and not a.find:
         ap.error("path or --find required")
