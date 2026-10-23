@@ -275,6 +275,9 @@ class Diff:
         for _ in range(self.depth):
             s = await self.step_up(va)
             if not s:
+                ow = self.owner(va)                          # say at least where the address sits (Delegate[] +0x368: no game value)
+                if ow and not out:
+                    out.append(f"inside {self.rt.klasses.get(ow[1], '?')} +{va - ow[0]:#x} @ {ow[0]:#x} (no field there)")
                 break
             if s[0] == "static":
                 out.append(s[1]); break
