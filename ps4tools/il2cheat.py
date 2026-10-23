@@ -35,7 +35,7 @@ CELL = dict(float=("Single", 4, "edx", "<f"), double=("Double", 8, "rdx", "<d"),
 # hop kinds: ("root", Type, static offset, field type, parent hops) | ("deref",) | ("add", off) | ("index", i, elemsize, is_list)
 #            | ("key_int", value) | ("key_type", TypeDefIndex, name) | ("key_class", TypeDefIndex, name) | ("key_nth", n, key text)
 #            the final slot is the value
-async def compile_path(res, rt, read, base, path):
+async def compile_path(res, rt, read, base, path, classes=None):
     """Path -> hops. Object classes behind pointers are read from the dump (auto downcast like il2live), string/_guid
     dictionary keys are resolved to their entry index in the dump."""
     segs = res.tokens(path)
@@ -57,6 +57,8 @@ async def compile_path(res, rt, read, base, path):
                 cur_t = (await rt.object_type_live(read, obj) if obj else None) or res.find_type(ftype, cur_t.ns if cur_t else "")
                 if cur_t is None:
                     sys.exit(f"unknown class for field type {ftype}")
+                if classes is not None:
+                    classes.add(cur_t.full)                 # objects on the way (Hero, AgentStats): their Update() surely runs while the value exists
             f = res.field(cur_t, arg) or sys.exit(f"{cur_t.full} has no field {arg}")
             off, ft, owner = f
             ftype = res.subst(ftype, owner, ft)
@@ -296,17 +298,17 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
             continue
         n = sum(counts.get(k, 0) for k in rt.by_full.get(t.full, []))
         if n:
-            core = 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD", cls) else 1
+            core = 2 if re.search(r"Credits|Menu|Title|Debug|Test|Loading|Tutorial|Intro|Splash|Demo|Cutscene", cls) else                 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD", cls) else 1   # scene-bound objects exist but do not tick in-game
             unity_msg = meth in ("Update", "LateUpdate", "FixedUpdate") and any(c.name == "MonoBehaviour" for c in res.chain(t))
             if unity_msg:                                     # called by the engine through the method pointer, never inlined
                 weak = False
             else:                                             # custom per-frame method: a private one may be inlined into its caller
                 weak = t.methods.get(meth) == "private"
             prio = HOOK_METHODS.index(meth) if meth in HOOK_METHODS else len(HOOK_METHODS)
-            cands.append((n != 1, t.full not in roots, not unity_msg, weak, core, prio, n, cls, meth, e["Address"]))   # a root class of the paths first
+            cands.append((n != 1, not unity_msg, t.full not in roots, weak, core, prio, n, cls, meth, e["Address"]))   # a class on the cheat paths first
     if want is None and os.environ.get("IL2CHEAT_LIST_HOOKS"):
         for c in sorted(cands)[:25]:
-            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[2] else ' (custom)'}{' (private)' if c[3] else ''}", file=sys.stderr)
+            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[1] else ' (custom)'}{' (private)' if c[3] else ''}{' (on path)' if not c[2] else ''}", file=sys.stderr)
     for _, _, _, _, _, _, n, cls, meth, rva in sorted(cands):
         site, size = [], 0
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
@@ -351,7 +353,7 @@ async def amain(a):
     for k, spec in enumerate(a.specs, 1):
         name, rest = spec.split("=", 1)                  # the path itself may contain "=" ({Type=X}, {_guid=...})
         path, value = rest.rsplit("=", 1)
-        hops, ftype = await compile_path(res, rt, read, rt.base, path)
+        hops, ftype = await compile_path(res, rt, read, rt.base, path, roots)
         emu = await emulate(rt, read, rt.base, hops)
         ref, _ = await il2live.follow(res, rt, read, rt.base, path)
         if emu != ref:
