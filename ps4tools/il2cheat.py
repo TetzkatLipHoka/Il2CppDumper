@@ -298,17 +298,19 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
             continue
         n = sum(counts.get(k, 0) for k in rt.by_full.get(t.full, []))
         if n:
-            core = 2 if re.search(r"Credits|Menu|Title|Debug|Test|Loading|Tutorial|Intro|Splash|Demo|Cutscene", cls) else                 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD", cls) else 1   # scene-bound objects exist but do not tick in-game
+            core = 2 if re.search(r"Credits|Menu|Title|Debug|Test|Loading|Tutorial|Intro|Splash|Demo|Cutscene", cls) else                 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD|Input|Pad", cls) else 1   # scene-bound objects exist but do not tick in-game
             unity_msg = meth in ("Update", "LateUpdate", "FixedUpdate") and any(c.name == "MonoBehaviour" for c in res.chain(t))
             if unity_msg:                                     # called by the engine through the method pointer, never inlined
                 weak = False
             else:                                             # custom per-frame method: a private one may be inlined into its caller
                 weak = t.methods.get(meth) == "private"
             prio = HOOK_METHODS.index(meth) if meth in HOOK_METHODS else len(HOOK_METHODS)
-            cands.append((n != 1, not unity_msg, t.full not in roots, weak, core, prio, n, cls, meth, e["Address"]))   # a class on the cheat paths first
+            # a dump keeps dead objects of earlier scenes, so "one instance" is weaker than a core name: Shogun Showdown had
+            # CombatManager x3 (one live) next to CreditsSceneManager x1
+            cands.append((not unity_msg, t.full not in roots, core, n != 1, weak, prio, n, cls, meth, e["Address"]))
     if want is None and os.environ.get("IL2CHEAT_LIST_HOOKS"):
         for c in sorted(cands)[:25]:
-            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[1] else ' (custom)'}{' (private)' if c[3] else ''}{' (on path)' if not c[2] else ''}", file=sys.stderr)
+            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[0] else ' (custom)'}{' (private)' if c[4] else ''}{' (on path)' if not c[1] else ''}", file=sys.stderr)
     for _, _, _, _, _, _, n, cls, meth, rva in sorted(cands):
         site, size = [], 0
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
