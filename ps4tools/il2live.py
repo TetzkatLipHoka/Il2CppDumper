@@ -465,10 +465,19 @@ class Resolver:
         head, sep, rest = path.partition("::")
         if not sep:
             sys.exit("path must start at a static field: Class::field...")
-        segs = [("static", head, rest.split(".")[0].split("[")[0].split("{")[0])]
-        first = rest.split(".")[0]
+        parts, buf, depth = [], "", 0                     # split on "." only outside [] / {}: {Type=YMCA.Core.X} keeps its dots (talixme)
+        for ch in rest:
+            depth += ch in "[{"
+            depth -= ch in "]}" and depth > 0
+            if ch == "." and depth == 0:
+                parts.append(buf); buf = ""
+            else:
+                buf += ch
+        parts.append(buf)
+        first = parts[0]
+        segs = [("static", head, first.split("[")[0].split("{")[0])]
         tail = first[len(segs[0][2]):]
-        for s in [tail] + rest.split(".")[1:]:
+        for s in [tail] + parts[1:]:
             m = re.match(r"^([A-Za-z_<>,`0-9 ]*)((?:\[[^\]]*\]|\{[^}]*\}|:[A-Za-z_.0-9]+)*)$", s)
             if not m:
                 sys.exit(f"cannot parse path segment '{s}'")
