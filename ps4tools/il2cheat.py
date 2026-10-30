@@ -298,7 +298,7 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
             continue
         n = sum(counts.get(k, 0) for k in rt.by_full.get(t.full, []))
         if n:
-            core = 2 if re.search(r"Credits|Menu|Title|Debug|Test|Loading|Tutorial|Intro|Splash|Demo|Cutscene", cls) else                 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD|Input|Pad", cls) else 1   # scene-bound objects exist but do not tick in-game
+            core = 2 if re.search(r"Credits|Menu|Title|Debug|Test|Loading|Tutorial|Intro|Splash|Demo|Cutscene|Developer|Recorder|Editor|Preview|Painter|FPSCounter", cls) else                 0 if re.search(r"Manager|System|Controller|Player|Game|Hud|HUD|Input|Pad", cls) else 1   # scene-bound objects exist but do not tick in-game
             unity_msg = meth in ("Update", "LateUpdate", "FixedUpdate") and any(c.name == "MonoBehaviour" for c in res.chain(t))
             if unity_msg:                                     # called by the engine through the method pointer, never inlined
                 weak = False
