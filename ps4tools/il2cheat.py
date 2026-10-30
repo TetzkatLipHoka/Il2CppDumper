@@ -286,6 +286,7 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
                 for k in rt.by_full.get(c.full, []):
                     counts[k] = counts.get(k, 0) + n
     cands = []
+    tokens = {r.split(".")[-1].lower() for r in roots if len(r.split(".")[-1]) >= 5}   # class names seen on the paths, as substrings
     want_cls, _, want_meth = want.partition(".") if want else (None, None, None)   # --hook Class or --hook Class.Method
     for e in script["ScriptMethod"]:
         cls, _, meth = e["Name"].rpartition("$$")
@@ -307,11 +308,12 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
             prio = HOOK_METHODS.index(meth) if meth in HOOK_METHODS else len(HOOK_METHODS)
             # a dump keeps dead objects of earlier scenes, so "one instance" is weaker than a core name: Shogun Showdown had
             # CombatManager x3 (one live) next to CreditsSceneManager x1
-            cands.append((not unity_msg, t.full not in roots, core, n != 1, weak, prio, n, cls, meth, e["Address"]))
+            related = any(tok in cls.lower() for tok in tokens)   # ScriptableManagerManager for a path through ScriptableManager objects
+            cands.append((not unity_msg, t.full not in roots, core, not related, n != 1, weak, prio, n, cls, meth, e["Address"]))
     if want is None and os.environ.get("IL2CHEAT_LIST_HOOKS"):
         for c in sorted(cands)[:25]:
-            print(f"  candidate {c[7]}.{c[8]} instances={c[6]}{'' if not c[0] else ' (custom)'}{' (private)' if c[4] else ''}{' (on path)' if not c[1] else ''}", file=sys.stderr)
-    for _, _, _, _, _, _, n, cls, meth, rva in sorted(cands):
+            print(f"  candidate {c[8]}.{c[9]} instances={c[7]}{'' if not c[0] else ' (custom)'}{' (private)' if c[5] else ''}{' (on path)' if not c[1] else ' (related)' if not c[3] else ''}", file=sys.stderr)
+    for _, _, _, _, _, _, _, n, cls, meth, rva in sorted(cands):
         site, size = [], 0
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
             if "rip" in ins.op_str or (not site and ins.mnemonic == "jmp"):    # rip-relative, or a thunk that only jumps on
@@ -380,6 +382,7 @@ async def amain(a):
         cheats.append((name, entries))
         print(f"{name}: {path} ({ftype}) = {value}, {len(hops)} hops, offline slot {ref:#x}")
         images.add(hops[0][1].image); roots.add(hops[0][1].full)
+        roots.update(re.findall(r"\{Type=([\w.]+)\}", path))   # {Type=X} keys name the objects the path walks through as well
 
     script = json.load(open(os.path.join(a.dumpdir, "sdk", "script.json")))
     hook, rva, aob, site, n = pick_hook(rt, res, dump, script, a.hook, images, roots)
