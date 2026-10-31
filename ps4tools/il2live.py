@@ -835,13 +835,20 @@ _word_cache = {}
 def word_in(word, seg):
     """The search word equals one or several consecutive camelCase / snake_case tokens of the segment: "mana" matches
     manaRegen, SpellManaCurrent and {:ManaCaster} but not SettingsManager; "mainactor" matches MainActor, "hp" matches _HpValue.
+    With * the word is a wildcard pattern that starts at a token: "heal*" matches currentHealth and healAmount (not
+    reheal), "*health" also matches playerHealth, "max*hp" matches maxHp and MaxBaseHP.
     Memoized: --find asks this millions of times for a few thousand distinct segments."""
     key = (word, seg)
     hit = _word_cache.get(key)
     if hit is None:
         toks = [t.lower() for t in TOKEN_RE.findall(seg)]
         w = word.lower()
-        hit = _word_cache[key] = any(w == "".join(toks[i:j]) for i in range(len(toks)) for j in range(i + 1, min(i + 5, len(toks) + 1)))
+        if "*" in w:                                 # wildcard: "heal*" -> health, healAmount, HealthBar; "*hp" -> maxHp, currentHP
+            rx = re.compile("".join(".*" if c == "*" else re.escape(c) for c in w) + r"\Z")   # still anchored at a token start
+            hit = any(rx.match("".join(toks[i:])) for i in range(len(toks)))
+        else:
+            hit = any(w == "".join(toks[i:j]) for i in range(len(toks)) for j in range(i + 1, min(i + 5, len(toks) + 1)))
+        _word_cache[key] = hit
     return hit
 
 
