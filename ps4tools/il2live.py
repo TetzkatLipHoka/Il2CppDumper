@@ -106,15 +106,68 @@ def parse_dump_cs(path):
         for start, name in images:
             if t.idx >= start:
                 t.image = name
-    for t in types.values():                        # open generics have no offsets in dump.cs: measured layouts
+    by_short = {}
+    for t in types.values():
+        by_short.setdefault(t.name.split("<")[0].split(".")[-1], []).append(t)
+
+    def base_class(t):
+        """The class t derives from (bases[0] when it is a class), same namespace first: UnityEngine.Component, not
+        System.ComponentModel.Component."""
+        if not t.bases or not t.bases[0]:
+            return None
+        b = t.bases[0]
+        cands = [c for c in by_short.get(b.split("<")[0].split(".")[-1], []) if c is not t and c.kind == "class"]
+        if not cands:
+            return None
+        arity = b.count(",") + 1 if "<" in b else 0
+        fit = [c for c in cands if (c.name.count(",") + 1 if "<" in c.name else 0) == arity] or cands
+        return ([c for c in fit if c.ns == t.ns] or [c for c in fit if c.ns.split(".")[0] == t.ns.split(".")[0]] or fit)[0]
+
+    done, ends = set(), {}
+
+    def layout(t, depth=0):
+        """Offsets for an open generic (dump.cs prints 0x0 for all its fields), laid out after the fields of its base
+        class: BehaviourMachine<T> : MonoBehaviour starts at 0x18, behind UnityEngine.Object.m_CachedPtr, not at 0x10."""
+        if id(t) in done or depth > 32:
+            return
+        done.add(id(t))
         base = t.name.split("<")[0]
         if base in GENERIC_LAYOUT and t.fields and all(o == 0 for o in t.fields):
             t.fields = dict(GENERIC_LAYOUT[base])
         elif "<" in t.name:
-            if t.fields and all(o == 0 for o in t.fields):
-                t.fields = generic_layout(t.order, 0 if t.kind == "struct" else 0x10)
+            if t.fields and (len(t.fields) > 1 or 0 in t.fields) and all(o == 0 for o in t.fields):
+                t.fields = generic_layout(t.order, 0 if t.kind == "struct" else end_of(base_class(t), depth + 1))
             if len(t.statics) > 1 and all(o == 0 for o in t.statics):
                 t.statics = generic_layout(t.sorder, 0)
+
+    def end_of(t, depth=0):
+        """First free offset behind the instance fields of class t and its bases (0x10 = bare object header)."""
+        if t is None or depth > 32:
+            return 0x10
+        if id(t) in ends:
+            return ends[id(t)]
+        layout(t, depth)
+        if t.fields:
+            o = max(t.fields)
+            typ = t.fields[o][0]
+            st = types.get(typ) or next((c for c in by_short.get(typ.split("<")[0].split(".")[-1], []) if c.kind in ("struct", "enum")), None)
+            if typ in PRIM:
+                size = PRIM[typ][1]
+            elif st is not None and st.kind == "struct" and st.fields:
+                lt = st.fields[max(st.fields)][0]
+                size = max(st.fields) + (PRIM[lt][1] if lt in PRIM else 8)
+            elif st is not None and st.kind == "enum":
+                size = PRIM.get(getattr(st, "enum_base", "int"), ("i", 4))[1]
+            else:
+                size = 8
+            r = o + size
+        else:
+            r = end_of(base_class(t), depth + 1)
+        ends[id(t)] = r
+        return r
+
+    for t in list(types.values()):                  # open generics have no offsets in dump.cs: measured layouts
+        layout(t)
     return types
 
 
@@ -465,12 +518,16 @@ class Resolver:
         head, sep, rest = path.partition("::")
         if not sep:
             sys.exit("path must start at a static field: Class::field...")
-        parts, buf, depth = [], "", 0                     # split on "." only outside [] / {}: {Type=YMCA.Core.X} keeps its dots (talixme)
+        # split on "." only outside [] / {} so keys like {Type=A.B.C} survive
+        parts, buf, depth = [], "", 0
         for ch in rest:
-            depth += ch in "[{"
-            depth -= ch in "]}" and depth > 0
+            if ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth = max(0, depth - 1)
             if ch == "." and depth == 0:
-                parts.append(buf); buf = ""
+                parts.append(buf)
+                buf = ""
             else:
                 buf += ch
         parts.append(buf)
@@ -759,8 +816,9 @@ async def find(res, rt, read, base, word, depth, max_paths=1000, types=None, obj
                 continue
             for child in await children(res, rt, read, path, addr, ftype):
                 named = want_val is None and any(word_in(word, sg) for sg in re.sub(r"\[[^\]]*\]", "", child[0]).replace("::", ".").split(".")[1:])
-                if child[1] not in seen or (named and not seen[child[1]]):   # an object reached again through a path that
-                    seen[child[1]] = named; nxt.append(child)                # carries the word is walked once more (MainActor.*)
+                sk = (child[1], child[2])                                  # address + type: Vector3 v and v.x share an address
+                if sk not in seen or (named and not seen[sk]):             # an object reached again through a path that
+                    seen[sk] = named; nxt.append(child)                      # carries the word is walked once more (MainActor.*)
         frontier = nxt
         if not frontier:
             break
@@ -795,6 +853,8 @@ async def match(res, rt, read, path, addr, ftype, word, want_val, out, types=Non
     fmt = value_format(res, ftype)
     if (fmt == "Q" and not objects) or (types and ftype not in types):
         return
+    if fmt == "Q" and ftype not in PRIM and (st := res.find_type(ftype)) is not None and st.kind == "struct":
+        return                                       # inline struct: its own fields (.x .y .z) are the hits, not a "pointer"
     try:
         v = struct.unpack("<" + fmt, await read_(read, addr, struct.calcsize(fmt)))[0]
     except LookupError:
@@ -819,6 +879,12 @@ async def children(res, rt, read, path, addr, ftype):
     if ftype in PRIM:
         return []
     base, gargs = split_generic(ftype)
+    if not ftype.endswith("[]") and (st := res.find_type(ftype)) is not None and st.kind == "struct":
+        # value type stored inline (Vector3 maxVelocity, Color, custom structs): its fields follow at addr, no pointer hop;
+        # struct offsets in dump.cs carry no object header. UnityEngine structs are walked too (Vector3.x etc.)
+        if rt.d.off(addr) is None:
+            return []
+        return [(f"{path}.{fn}", addr + off, res.subst(ftype, st, ft), 0) for off, (ft, fn) in st.fields.items()]
     try:
         obj = await read_u64(read, addr)
     except LookupError:

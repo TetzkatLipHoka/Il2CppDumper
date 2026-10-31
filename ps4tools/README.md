@@ -54,8 +54,10 @@ Notes measured on real dumps (metadata v29 / v31, x64):
 
 * object header 0x10 (`klass*`, `monitor*`); dump.cs class field offsets include it, struct offsets do not
 * `Il2CppClass`: name 0x10, namespace 0x18, declaringType 0x50, parent 0x58, generic_class 0x60 (-> +8 class_inst -> +8 type_argv), static_fields 0xB8
-* open generic classes have no field offsets in dump.cs (all `0x0`): the tools lay them out sequentially from 0x10 with natural
-  alignment, a type parameter as 8 bytes (`SyncValue<T>`: `_Value` 0x10, `OnValueChanged` 0x18; wrong for struct parameters)
+* open generic classes have no field offsets in dump.cs (all `0x0`): the tools lay them out sequentially behind the fields of the
+  base class with natural alignment, a type parameter as 8 bytes (`SyncValue<T>`: `_Value` 0x10, `OnValueChanged` 0x18;
+  `BehaviourMachine<T> : MonoBehaviour` starts at 0x18 behind `m_CachedPtr`; wrong for struct parameters)
+* value-type fields (`Vector3`, `Color`, own structs) are inline: `--find` walks their fields (`.position.x`), no pointer hop
 * statics of a generic base (`Player : MonoSingleton<Player>`) are reached as `TypeInfo[idx(Player)].parent.static_fields`,
   the generic instance class itself is not in the TypeInfo table
 * arrays: elements from 0x20; `List<T>`: `_items` 0x10, `_size` 0x18; `Dictionary<K,V>`: `_entries` 0x18, `_count` 0x20, entry = {int hash, int next, key @8, value @0x10}; `HashSet<T>`: `_slots` 0x18, `_count` 0x20, slot = {int hash, int next, value @8} (0x10 bytes, free slots have hash < 0)
