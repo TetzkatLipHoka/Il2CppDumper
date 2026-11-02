@@ -264,10 +264,14 @@ class Runtime:
             i = m.find(b"\xaf\x1b\xb1\xfa", i + 4)
         r = [x for x in dump.regs if x["offset"] <= i < x["offset"] + x["end"] - x["start"]][0]
         self.meta = r["start"] + i - r["offset"]
-        hdr = [struct.unpack_from("<ii", m, i + 8 + k * 8) for k in range(31)]
+        ver = struct.unpack_from("<I", m, i + 4)[0]
+        step = 12 if ver >= 39 else 8                               # v39 header entries are (offset, size, count) triples
+        hdr = [struct.unpack_from("<ii", m, i + 8 + k * step) for k in range(31)]
         self.str0, self.str1 = self.meta + hdr[2][0], self.meta + hdr[2][0] + hdr[2][1]
         td_off, td_size = hdr[19]
-        self.td_off, self.td_count = td_off, td_size // 0x58
+        self.td_count = struct.unpack_from("<i", m, i + 8 + 19 * step + 8)[0] if ver >= 39 else td_size // 0x58
+        self.td_size = td_size // self.td_count                     # sizeof(Il2CppTypeDefinition): 0x58 up to v31, 76 or 82 in the two v39 layouts
+        self.td_off = td_off
         self.typedef_names = {t.idx: t.full for t in types.values()}
         self.module = module
         self.base = dump.module_base(module)
@@ -280,7 +284,7 @@ class Runtime:
             self.table_off = c["table_off"]
             self.meta_off = c["meta_off"]
         except Exception:
-            name_vas = {self.str0 + struct.unpack_from("<i", m, i + td_off + k * 0x58)[0] for k in range(td_size // 0x58)}
+            name_vas = {self.str0 + struct.unpack_from("<i", m, i + td_off + k * self.td_size)[0] for k in range(self.td_count)}
             self.klasses = self.find_klasses(np.array(sorted(name_vas), dtype=np.uint64))
             self.by_full = {}
             for k in self.klasses:
@@ -308,7 +312,7 @@ class Runtime:
             return None
         meta = await read_u64(read, self.base + self.meta_off)
         data = await read_u64(read, il2cpptype)
-        idx, rest = divmod(data - meta - self.td_off, 0x58)
+        idx, rest = divmod(data - meta - self.td_off, self.td_size)
         return self.typedef_names.get(idx) if rest == 0 and 0 <= idx < self.td_count else None
 
     def find_table_off(self):

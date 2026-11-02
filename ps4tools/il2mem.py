@@ -14,10 +14,11 @@ META_MAGIC = b"\xaf\x1b\xb1\xfa"
 
 
 def metadata_size(buf, base):
-    """Furthest section end from the (offset, size) pairs behind sanity+version."""
+    """Furthest section end from the (offset, size) pairs behind sanity+version; v39 (Unity 6.x) has (offset, size, count) triples."""
+    step = 12 if struct.unpack_from("<I", buf, base + 4)[0] >= 39 else 8
     end, prev = 8, 0
     for i in range(64):
-        off, size = struct.unpack_from("<ii", buf, base + 8 + i * 8)
+        off, size = struct.unpack_from("<ii", buf, base + 8 + i * step)
         if off < 8 or off > 0x7FFFFFFF or size < 0 or off < prev:
             break
         prev, end = off, max(end, off + size)

@@ -71,7 +71,7 @@ class Diff:
             tp = argv and self.a.u64(argv)
             data = tp and self.a.u64(tp)
             meta = self.a.u64(self.rt.base + self.rt.meta_off)
-            idx, rest = divmod(data - meta - self.rt.td_off, 0x58)
+            idx, rest = divmod(data - meta - self.rt.td_off, self.rt.td_size)
             return self.rt.typedef_names.get(idx) if rest == 0 else None
         except (TypeError, struct.error):
             return None

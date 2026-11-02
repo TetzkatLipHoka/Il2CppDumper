@@ -157,7 +157,7 @@ def asm_hops(rt, hops, fail):
                 code.append(f"; dictionary entry #{h[1]} = key {h[2]} in the dump, key not verified at runtime")
                 continue
             if k == "key_type":
-                code += ["movabs r8, MetadataPtr", "mov r8, [r8]", f"add r8, {rt.td_off + h[1] * 0x58:#x}"]    # Il2CppTypeDefinition* of the key type
+                code += ["movabs r8, MetadataPtr", "mov r8, [r8]", f"add r8, {rt.td_off + h[1] * rt.td_size:#x}"]    # Il2CppTypeDefinition* of the key type
             if k == "key_class":
                 code += ["movabs r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]"]   # Il2CppClass* of the value class
             code += [f"{lbl}_loop:", "test ecx, ecx", f"jz {fail}"]
@@ -219,7 +219,7 @@ async def emulate(rt, read, base, hops):
                 a = entries + 0x20 + h[1] * 0x18 + 0x10 if count > h[1] else None
                 continue
             meta = await il2live.read_u64(read, base + rt.meta_off) if k == "key_type" else 0
-            want = meta + rt.td_off + h[1] * 0x58 if k == "key_type" else h[1]
+            want = meta + rt.td_off + h[1] * rt.td_size if k == "key_type" else h[1]
             if k == "key_class":
                 want = await il2live.read_u64(read, await il2live.read_u64(read, base + rt.table_off) + 8 * h[1])
             for n in range(count):

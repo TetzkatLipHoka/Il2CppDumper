@@ -50,7 +50,11 @@ because such keys are per-session hash codes), `{_guid=...}` and string keys use
 (entry order only changes when something is removed from the dictionary). Flag/Val cells are GetMem cells addressed
 as `[Flag1]`, like the Unreal trainers.
 
-Notes measured on real dumps (metadata v29 / v31, x64):
+Notes measured on real dumps (metadata v29 / v31 / v39, x64):
+
+* metadata v39 (Unity 6): header entries are (offset, size, count) triples, `Il2CppTypeDefinition` is 76 or 82 bytes depending on the
+  build (Unity 6000.3.13f1: 82, the dumper reports it as `39,1`), the tools take the size from the header count; nothing else in
+  the runtime structures changed (Il2CppClass, TypeInfo table, metadata pointer)
 
 * object header 0x10 (`klass*`, `monitor*`); dump.cs class field offsets include it, struct offsets do not
 * `Il2CppClass`: name 0x10, namespace 0x18, declaringType 0x50, parent 0x58, generic_class 0x60 (-> +8 class_inst -> +8 type_argv), static_fields 0xB8
