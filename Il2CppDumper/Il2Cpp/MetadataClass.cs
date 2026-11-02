@@ -227,8 +227,12 @@ namespace Il2CppDumper
         [Version(Min = 39)]
         public ushort typeCountV39;
 
-        [Version(Min = 24)]
+        [Version(Min = 24, Max = 39)]
         public int exportedTypeStart;
+        [Version(Min = 39.1)]
+        public ushort unknownV391; // 0 in every image observed (Unity 6000.3.13f1)
+        [Version(Min = 39.1)]
+        public ushort exportedTypeStartV391;
         [Version(Min = 24)]
         public uint exportedTypeCount;
 
@@ -249,19 +253,22 @@ namespace Il2CppDumper
         [Version(Max = 24)]
         public int customAttributeIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int byvalTypeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort byvalTypeIndexV39;
         [Version(Max = 24.5)]
         public int byrefTypeIndex;
 
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int declaringTypeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort declaringTypeIndexV39;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int parentIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort parentIndexV39;
         // v39 dropped elementTypeIndex entirely. Metadata.FixIndexesV39 rebuilds it
         // for enums from the type of their value__ field, which is what it held.
@@ -334,8 +341,9 @@ namespace Il2CppDumper
         [Version(Min = 39)]
         public ushort declaringTypeV39;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int returnType;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort returnTypeV39;
         [Version(Min = 31)]
         public int returnParameterToken;
@@ -370,8 +378,9 @@ namespace Il2CppDumper
         [Version(Max = 24)]
         public int customAttributeIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
     }
 
@@ -379,8 +388,9 @@ namespace Il2CppDumper
     {
         public uint nameIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
         [Version(Max = 24)]
         public int customAttributeIndex;
@@ -392,8 +402,9 @@ namespace Il2CppDumper
     {
         public int fieldIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
         public int dataIndex;
     }
@@ -444,8 +455,9 @@ namespace Il2CppDumper
     {
         public int parameterIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
         public int dataIndex;
     }
@@ -454,8 +466,9 @@ namespace Il2CppDumper
     {
         public uint nameIndex;
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
         public int add;
         public int remove;
@@ -480,8 +493,9 @@ namespace Il2CppDumper
     public class Il2CppFieldRef
     {
         [Version(Max = 38)]
+        [Version(Min = 39.1)]
         public int typeIndex;
-        [Version(Min = 39)]
+        [Version(Min = 39, Max = 39)]
         public ushort typeIndexV39;
         public int fieldIndex; // local offset into type fields
     }

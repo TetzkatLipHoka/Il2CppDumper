@@ -420,6 +420,7 @@ namespace Il2CppDumper
                 case 29.1:
                 case 31:
                 case 39:
+                case 39.1:
                     // v39's runtime C structs are unchanged from v29; only the
                     // on-disk metadata format differs.
                     sb.Append(HeaderConstants.HeaderV29);

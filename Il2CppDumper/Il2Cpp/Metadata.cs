@@ -60,6 +60,13 @@ namespace Il2CppDumper
             }
             Version = version;
             header = ReadClass<Il2CppGlobalMetadataHeader>(0);
+            if (version == 39 && header.typeDefinitionsCountV39 > 0 && header.typeDefinitionsSize / header.typeDefinitionsCountV39 == 82)
+            {
+                // Same version number, wider layout (seen with Unity 6000.3.13f1): TypeIndex fields stay int32,
+                // only TypeDefinitionIndex / GenericContainerIndex fields, the generic parameter owner and the
+                // image type range are uint16. Il2CppTypeDefinition is 82 bytes instead of 76.
+                Version = 39.1;
+            }
             if (version == 24)
             {
                 if (header.stringLiteralOffset == 264)
@@ -96,6 +103,10 @@ namespace Il2CppDumper
                 Version = 24.1;
             }
             typeDefs = ReadMetadataClassArray<Il2CppTypeDefinition>(header.typeDefinitionsOffset, header.typeDefinitionsSize);
+            if (Version >= 39 && typeDefs.Length != header.typeDefinitionsCountV39)
+            {
+                throw new NotSupportedException($"ERROR: Metadata v{version} with a {header.typeDefinitionsSize / header.typeDefinitionsCountV39}-byte Il2CppTypeDefinition is not supported (known: 76 and 82 bytes).");
+            }
             methodDefs = ReadMetadataClassArray<Il2CppMethodDefinition>(header.methodsOffset, header.methodsSize);
             parameterDefs = ReadMetadataClassArray<Il2CppParameterDefinition>(header.parametersOffset, header.parametersSize);
             fieldDefs = ReadMetadataClassArray<Il2CppFieldDefinition>(header.fieldsOffset, header.fieldsSize);
@@ -104,8 +115,8 @@ namespace Il2CppDumper
             fieldDefaultValuesDic = fieldDefaultValues.ToDictionary(x => x.fieldIndex);
             parameterDefaultValuesDic = parameterDefaultValues.ToDictionary(x => x.parameterIndex);
             propertyDefs = ReadMetadataClassArray<Il2CppPropertyDefinition>(header.propertiesOffset, header.propertiesSize);
-            // v39 narrowed the standalone TypeIndex arrays to uint16 as well.
-            if (Version >= 39)
+            // v39 narrowed the standalone TypeIndex arrays to uint16 as well (not the v39.1 layout).
+            if (Version == 39)
             {
                 interfaceIndices = Array.ConvertAll(
                     ReadClassArray<ushort>(header.interfacesOffset, header.interfacesSize / 2), WidenIndexV39);
@@ -118,7 +129,7 @@ namespace Il2CppDumper
             eventDefs = ReadMetadataClassArray<Il2CppEventDefinition>(header.eventsOffset, header.eventsSize);
             genericContainers = ReadMetadataClassArray<Il2CppGenericContainer>(header.genericContainersOffset, header.genericContainersSize);
             genericParameters = ReadMetadataClassArray<Il2CppGenericParameter>(header.genericParametersOffset, header.genericParametersSize);
-            if (Version >= 39)
+            if (Version == 39)
             {
                 constraintIndices = Array.ConvertAll(
                     ReadClassArray<ushort>(header.genericParameterConstraintsOffset, header.genericParameterConstraintsSize / 2), WidenIndexV39);
@@ -200,26 +211,32 @@ namespace Il2CppDumper
         {
             foreach (var typeDef in typeDefs)
             {
-                typeDef.byvalTypeIndex = WidenIndexV39(typeDef.byvalTypeIndexV39);
-                typeDef.declaringTypeIndex = WidenIndexV39(typeDef.declaringTypeIndexV39);
-                typeDef.parentIndex = WidenIndexV39(typeDef.parentIndexV39);
+                if (Version == 39)
+                {
+                    typeDef.byvalTypeIndex = WidenIndexV39(typeDef.byvalTypeIndexV39);
+                    typeDef.declaringTypeIndex = WidenIndexV39(typeDef.declaringTypeIndexV39);
+                    typeDef.parentIndex = WidenIndexV39(typeDef.parentIndexV39);
+                }
                 typeDef.genericContainerIndex = WidenIndexV39(typeDef.genericContainerIndexV39);
             }
             foreach (var methodDef in methodDefs)
             {
                 methodDef.declaringType = WidenIndexV39(methodDef.declaringTypeV39);
-                methodDef.returnType = WidenIndexV39(methodDef.returnTypeV39);
+                if (Version == 39)
+                {
+                    methodDef.returnType = WidenIndexV39(methodDef.returnTypeV39);
+                }
                 methodDef.genericContainerIndex = WidenIndexV39(methodDef.genericContainerIndexV39);
             }
-            foreach (var parameterDef in parameterDefs)
+            if (Version == 39) foreach (var parameterDef in parameterDefs)
             {
                 parameterDef.typeIndex = WidenIndexV39(parameterDef.typeIndexV39);
             }
-            foreach (var fieldDef in fieldDefs)
+            if (Version == 39) foreach (var fieldDef in fieldDefs)
             {
                 fieldDef.typeIndex = WidenIndexV39(fieldDef.typeIndexV39);
             }
-            foreach (var eventDef in eventDefs)
+            if (Version == 39) foreach (var eventDef in eventDefs)
             {
                 eventDef.typeIndex = WidenIndexV39(eventDef.typeIndexV39);
             }
@@ -232,15 +249,15 @@ namespace Il2CppDumper
                 imageDef.typeStart = imageDef.typeStartV39;
                 imageDef.typeCount = imageDef.typeCountV39;
             }
-            foreach (var fieldDefaultValue in fieldDefaultValuesDic.Values)
+            if (Version == 39) foreach (var fieldDefaultValue in fieldDefaultValuesDic.Values)
             {
                 fieldDefaultValue.typeIndex = WidenIndexV39(fieldDefaultValue.typeIndexV39);
             }
-            foreach (var parameterDefaultValue in parameterDefaultValuesDic.Values)
+            if (Version == 39) foreach (var parameterDefaultValue in parameterDefaultValuesDic.Values)
             {
                 parameterDefaultValue.typeIndex = WidenIndexV39(parameterDefaultValue.typeIndexV39);
             }
-            if (fieldRefs != null)
+            if (Version == 39 && fieldRefs != null)
             {
                 foreach (var fieldRef in fieldRefs)
                 {
@@ -397,11 +414,10 @@ namespace Il2CppDumper
             var size = 0;
             foreach (var i in type.GetFields())
             {
-                var attr = (VersionAttribute)Attribute.GetCustomAttribute(i, typeof(VersionAttribute));
-                if (attr != null)
+                var attrs = i.GetCustomAttributes<VersionAttribute>().ToArray();
+                if (attrs.Length > 0 && !attrs.Any(a => Version >= a.Min && Version <= a.Max))
                 {
-                    if (Version < attr.Min || Version > attr.Max)
-                        continue;
+                    continue;
                 }
                 var fieldType = i.FieldType;
                 if (fieldType.IsPrimitive)
