@@ -737,7 +737,7 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None, this_obj
                     trace.append(f".{arg} @ {addr:#x} ({ftype}) in {cur_t.full}")
                 continue
             if op == "index":
-                i = int(arg, 0)
+                i = int(arg.lstrip("$") or "0", 0)                # [$n]: il2cheat cell, default n
                 if base == "List":
                     size = struct.unpack("<i", await read_(read, obj + 0x18, 4))[0]
                     obj = await read_u64(read, obj + 0x10)
@@ -765,6 +765,7 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None, this_obj
                     trace.append(f"{{{arg}}} @ {addr:#x} ({ftype}, set element {n})")
                 continue
             if op == "key":
+                arg = arg[1:] if arg.startswith("$") else arg      # {$n}: il2cheat key cell, default n
                 ktype, vtype = gargs[0], gargs[1]
                 entries = await read_u64(read, obj + 0x18)
                 count = struct.unpack("<i", await read_(read, obj + 0x20, 4))[0]

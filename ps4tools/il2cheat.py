@@ -6,7 +6,7 @@
     python il2cheat.py <dumpdir> out.TLH --hook Player "Health=this.health.health=999"         "Ammo=call:PlayerData::instance.inventory.AddAmmo(PlayerData::instance.inventory.ownedAmmo[1], $5)"         "Slow=call:UnityEngine.Time.set_timeScale(0.3)" "No damage=patch:PlayerHealth.GetDamage=noop"
 
 Cheat kinds: "Name=path=value" writes the value every frame while on (int/float/bool/byte/short/long/enum fields); the path is
-il2live syntax (Class::static or this. for the hooked object, .field, [i], {key}, {Type=X}, :Cast). "Name=call:Path.Method(args)"
+il2live syntax (Class::static or this. for the hooked object, .field, [i] / [$n] (index from a cell), {key} / {$n}, {Type=X}, :Cast). "Name=call:Path.Method(args)"
 calls the game's method once per switch-on from the hook cave (System V, MethodInfo* = 0; args: numbers, enum members, true/false,
 null, $n = editable cell, a path = object). "Name=patch:Class.Method[(types)]=noop|true|false|<n>" is a TLH Assembly entry at the
 method start (return value forced / method skipped), toggled by the menu, no hook. The call/patch kinds follow ReaperPy's idea. The hook is the first byte of
@@ -80,9 +80,11 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
             if off:
                 hops.append(("add", off))
         elif op == "index":
-            i = int(arg, 0)
             etype = gargs[0] if base_name == "List" else ftype[:-2]
-            hops += [("deref",), ("index", i, elem_size(res, etype), base_name == "List")]
+            if arg.startswith("$"):                                          # [$n]: index from an editable cell, default n
+                hops += [("deref",), ("index_cell", int(arg[1:] or "0", 0), elem_size(res, etype), base_name == "List")]
+            else:
+                hops += [("deref",), ("index", int(arg, 0), elem_size(res, etype), base_name == "List")]
             ftype = etype
         elif op == "key":
             hops.append(("deref",))
@@ -106,6 +108,8 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
                 ct = res.find_type(arg[1:]) or sys.exit(f"{arg}: class {arg[1:]} not in dump.cs")
                 hops.append(("key_class", ct.idx, ct.full))
             elif ktype in PRIM or (ktype != "string" and res.find_types(ktype) and all(x.kind == "enum" for x in res.find_types(ktype))):
+                if arg.startswith("$"):                                      # {$n}: key from an editable cell, default n
+                    hops.append(("key_int_cell", int(arg[1:] or "0", 0))); ftype = vtype; continue
                 hops.append(("key_int", int(arg, 0)))
                 if vtype not in PRIM:                           # int keys of a type cache are per-session hash codes: match the value's class instead
                     d = await emulate(rt, read, base, hops[:-1], this and this[1])
@@ -129,8 +133,9 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
 
 
 # ---- hops -> assembly -------------------------------------------------------------------------------------------------
-def asm_hops(rt, hops, fail):
-    code = []
+def asm_hops(rt, hops, fail, cells=None):
+    """cells: [(symbol, default)] of the [$n] / {$n} cells the code reads (4-byte integers), appended here."""
+    code, cells = [], [] if cells is None else cells
     for h in hops:
         k = h[0]
         if k == "root":
@@ -153,6 +158,20 @@ def asm_hops(rt, hops, fail):
             if is_list:
                 code += ["mov rax, [rax+0x10]", "test rax, rax", f"jz {fail}", f"cmp dword ptr [rax+0x18], {i}", f"jle {fail}"]
             code.append(f"add rax, {0x20 + i * es:#x}")
+        elif k in ("index_cell", "key_int_cell"):            # [$n] / {$n}: index or int key from an editable cell
+            cell = f"{'Idx' if k == 'index_cell' else 'Key'}{fail[:-4]}_{len(cells)}"
+            cells.append((cell, h[1]))
+            if k == "index_cell":
+                code += [f"mov ecx, dword ptr [{cell}]", "cmp dword ptr [rax+0x18], ecx", f"jbe {fail}"]       # unsigned: a negative cell fails too
+                if h[3]:
+                    code += ["mov rax, [rax+0x10]", "test rax, rax", f"jz {fail}", "cmp dword ptr [rax+0x18], ecx", f"jbe {fail}"]
+                code += [f"imul rcx, rcx, {h[2]:#x}", "lea rax, [rax+rcx+0x20]"]
+            else:
+                lbl = fail.replace("_end", "") + f"_k{len(code)}"
+                code += ["mov rdx, [rax+0x18]", "test rdx, rdx", f"jz {fail}", "mov ecx, dword ptr [rax+0x20]", "add rdx, 0x20",
+                         f"mov r8d, dword ptr [{cell}]", f"{lbl}_loop:", "test ecx, ecx", f"jz {fail}",
+                         "cmp dword ptr [rdx+8], r8d", f"je {lbl}_found", "add rdx, 0x18", "dec ecx", f"jmp {lbl}_loop",
+                         f"{lbl}_found:", "lea rax, [rdx+0x10]"]
         elif k in ("set_nth", "set_class"):                  # HashSet<T>: walk the used slots (hashCode >= 0), 0x10 bytes each
             lbl = fail.replace("_end", "") + f"_s{len(code)}"
             code += ["mov rdx, [rax+0x18]", "test rdx, rdx", f"jz {fail}", "mov ecx, dword ptr [rdx+0x18]", "add rdx, 0x20"]  # slots, length
@@ -190,11 +209,19 @@ def asm_hops(rt, hops, fail):
     return code
 
 
+def cell_entries(cells):
+    """[$n] / {$n} cells -> GetMem lines and TLH value entries."""
+    return ([f"GetMem( {c}, 4 )" for c, _ in cells],
+            [f"      <Symbol>{c}</Symbol>\n      <Type>Value</Type>\n      <ValueType>Integer</ValueType>\n      <Value>{d}</Value>" for c, d in cells])
+
+
 # ---- emulation of the hops against the dump (self check, the asm is not executed here) ---------------------------------
 async def emulate(rt, read, base, hops, this_obj=None):
     a = None
     for h in hops:
         k = h[0]
+        if k in ("index_cell", "key_int_cell"):                          # the cell holds its default in the dump check
+            h = (k[:-5],) + h[1:]; k = h[0]
         if k == "this":
             a = this_obj
         elif k == "root":
@@ -384,12 +411,12 @@ def ret_asm(res, ret, mode, who):
 
 async def compile_call(res, rt, read, base, k, target, this_info, roots, images):
     """'Path.Method(args)' or 'Class.Method(args)' (static) -> (asm lines, GetMem lines, RegisterSymbol lines, cheat value entries, text).
-    Arguments: numbers, enum members (Weapons.Revolver or Revolver), true/false, null, $n (editable value cell with default n),
+    Arguments: numbers, enum members (Weapons.Revolver or Revolver), true/false, null, $n / $Member (editable value cell with default n),
     or a path (Class::... / this....) for an object parameter. System V order (this, args..., MethodInfo* = 0); floats in xmm."""
     m = re.match(r"^(?P<target>.+?)\((?P<args>.*)\)$", target) or sys.exit(f"{target}: expected Path.Method(args)")
     obj_path, _, mname = m["target"].rpartition(".")
     args = split_args(m["args"])
-    mems, syms, entries, code = [], [], [], []
+    mems, syms, entries, code, cells = [], [], [], [], []
     if is_path(obj_path):
         hops, ftype = await compile_path(res, rt, read, base, obj_path, roots, this_info)
         hops.append(("deref",))                                                  # the path names the slot, this = the object in it
@@ -399,7 +426,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images)
         if meth.static:
             sys.exit(f"{meth.sig} is static, call it as {t.name}.{mname}(...)")
         mems.append(f"GetMem( This{k}, 8 )")
-        code += asm_hops(rt, hops, f"c{k}_end") + [f"mov [This{k}], rax"]
+        code += asm_hops(rt, hops, f"c{k}_end", cells) + [f"mov [This{k}], rax"]
         if hops[0][0] == "root":
             images.add(hops[0][1].image)
     else:
@@ -444,7 +471,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images)
             hops, _ = await compile_path(res, rt, read, base, text, roots, this_info)
             hops.append(("deref",))                                              # object argument = the pointer in the slot
             mems.append(f"GetMem( Arg{k}_{i}, 8 )")
-            code += asm_hops(rt, hops, f"c{k}_{i}_end") + [f"mov [Arg{k}_{i}], rax"]
+            code += asm_hops(rt, hops, f"c{k}_{i}_end", cells) + [f"mov [Arg{k}_{i}], rax"]
             loads.append(f"mov {reg}, [Arg{k}_{i}]")
             if hops[0][0] == "root":
                 images.add(hops[0][1].image)
@@ -470,6 +497,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images)
         else:
             sys.exit(f"{who}: {ptype} parameters take a path to an object or null")
     syms.append(f"RegisterSymbol( Call{k}, ModuleBase+{meth.rva:#x} )")
+    cm, ce = cell_entries(cells); mems += cm; entries += ce
     code += [f"mov byte ptr [Flag{k}], 2",                                      # once per switch-on, only after every path resolved
              "push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8"]       # entry rsp = 8 mod 16, 6 saves in the frame + 4 here: sub 8 aligns
     if not meth.static:
@@ -553,7 +581,9 @@ async def amain(a):
         if vt not in CELL:
             sys.exit(f"{name}: field type {ftype} not supported (number/bool/enum only)")
         tlh_type, size, vreg, fmt = CELL[vt]
-        code = [f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + asm_hops(rt, hops, f"c{k}_end")
+        cells = []
+        code = [f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + asm_hops(rt, hops, f"c{k}_end", cells)
+        cm, ce = cell_entries(cells); mems += cm; entries += ce
         if vt == "bool":
             code.append(f"mov byte ptr [rax], {int(value.strip().lower() not in ('0', 'false', 'no'))}")
         else:

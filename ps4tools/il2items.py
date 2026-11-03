@@ -8,10 +8,10 @@ object, printed as ready il2cheat specs (the ReaperPy unity_items idea, without 
 Ranking is by name (ItemID-like enums with many members; Add/Give/Grant... methods with an enum/int id parameter and an
 optional count), game assemblies only. An instance method needs an object: il2items searches the static roots (depth 4)
 for one of the owner class and prints the path, or suggests hooking the owner's Update and calling this.Method(...).
-Object parameters (ItemData, Ammunition) cannot be made up: those methods are listed with the reason, a path to an
-existing object can be given by hand (see README).
+Object parameters (ItemData, Ammunition) are taken from a List / array / Dictionary of such objects reachable from a static
+root, the element picked by an editable cell ([$0] / {$0}); without one the method is listed with the reason and a spec template.
 """
-import argparse, asyncio, os, re, sys
+import argparse, asyncio, os, re, struct, sys
 import il2live
 from il2live import PRIM
 
@@ -93,10 +93,15 @@ def give_score(m, cls, enum_t, main=()):
     return s
 
 
-async def object_path(res, rt, read, base, owner, depth=4):
-    """Shortest path from a static root to an object of class `owner` (or a subclass) in the dump, or None."""
-    want = {c.full for c in res.types.values() if any(x is owner for x in res.chain(c))}
-    frontier, seen = [], set()
+_NODES = None
+
+
+async def nodes(res, rt, read, base, depth=4):
+    """Every (path, slot address, field type) within `depth` hops of a static root, BFS order (shortest paths first); walked once."""
+    global _NODES
+    if _NODES is not None:
+        return _NODES
+    frontier, seen, out = [], set(), []
     for t in res.types.values():
         if t.kind != "class" or "<" in t.name or not (t.statics or res.inherited_statics(t)):
             continue
@@ -110,18 +115,49 @@ async def object_path(res, rt, read, base, owner, depth=4):
     for _ in range(depth + 1):
         nxt = []
         for path, addr, ftype in frontier:
-            if il2live.value_format(res, ftype) == "Q":
-                try:
-                    obj = await il2live.read_u64(read, addr)
-                    ot = rt.object_type(obj) if obj else None
-                except LookupError:
-                    ot = None
-                if ot and ot.full in want:
-                    return path
+            out.append((path, addr, ftype))
             for child in await il2live.children(res, rt, read, path, addr, ftype):
                 if child[1] not in seen:
                     seen.add(child[1]); nxt.append(child[:3])
         frontier = nxt
+    _NODES = out
+    return out
+
+
+async def object_path(res, rt, read, base, owner):
+    """Shortest path from a static root to an object of class `owner` (or a subclass) in the dump, or None."""
+    want = {c.full for c in res.types.values() if any(x is owner for x in res.chain(c))}
+    for path, addr, ftype in await nodes(res, rt, read, base):
+        if il2live.value_format(res, ftype) == "Q":
+            try:
+                obj = await il2live.read_u64(read, addr)
+                ot = rt.object_type(obj) if obj else None
+            except LookupError:
+                ot = None
+            if ot and ot.full in want:
+                return path
+    return None
+
+
+async def collection_path(res, rt, read, base, elem):
+    """Shortest path to a non-empty List<T> / T[] / Dictionary<int or enum, T> of `elem` objects (or subclasses) in the
+    dump, with the element picked by an editable il2cheat cell: 'Root::db.items[$0]' / '{$0}', plus the element count."""
+    want = {c.name for c in res.types.values() if any(x is elem for x in res.chain(c))}
+    for path, addr, ftype in await nodes(res, rt, read, base):
+        bn, ga = il2live.split_generic(ftype)
+        if (ftype.endswith("[]") and ftype[:-2] in want) or (bn == "List" and ga and ga[0] in want):
+            suffix, cnt = "[$0]", 0x18
+        elif bn == "Dictionary" and len(ga) == 2 and ga[1] in want and (ga[0] in INTS or (res.find_type(ga[0]) or il2live.Type("x", "", "", [], 0)).kind == "enum"):
+            suffix, cnt = "{$0}", 0x20
+        else:
+            continue
+        try:
+            obj = await il2live.read_u64(read, addr)
+            n = struct.unpack("<i", await il2live.read_(read, obj + cnt, 4))[0] if obj else 0
+        except LookupError:
+            n = 0
+        if n > 0:
+            return path + suffix, n
     return None
 
 
@@ -162,26 +198,36 @@ async def amain(a):
     rejected.sort(key=lambda r: -give_score(r[0], None, best, main))
     if not gives:
         sys.exit("no give-like method with an enum/int item parameter; rejected: " + "; ".join(f"{m.sig}: {why}" for m, why in rejected[:10]))
+    async def receiver(m):
+        """-> (what the call starts with: 'Class.' / 'path.' / 'this.', note) or None when the object is unreachable."""
+        if m.static:
+            return f"{m.cls.name}.", "static"
+        path = await object_path(res, rt, read, rt.base, m.cls)
+        hooks = [h for h in m.cls.methods if h in ("Update", "LateUpdate", "FixedUpdate")]
+        if path:
+            return f"{path}.", f"object via {path}"
+        if hooks and il2live.instances_of(res, rt, dump, m.cls):
+            return "this.", f"no static path; hook the owner: --hook {m.cls.name}.{hooks[0]}"
+        print(f"# {m.sig}: no static path to a {m.cls.name} object and no per-frame method to hook")
+        return None
+
     shown = 0
     for m, id_i, cnt_i, et in gives[:a.limit]:
         if a.method and m.name != a.method:
             continue
         et = et or best
         args = m.args
-        if m.static:
-            target, note = f"{m.cls.name}.{m.name}", "static"
-        else:
-            path = await object_path(res, rt, read, rt.base, m.cls)
-            hooks = [h for h in m.cls.methods if h in ("Update", "LateUpdate", "FixedUpdate")]
-            if path:
-                target, note = f"{path}.{m.name}", f"object via {path}"
-            elif hooks and il2live.instances_of(res, rt, dump, m.cls):
-                target, note = f"this.{m.name}", f"no static path; hook the owner: --hook {m.cls.name}.{hooks[0]}"
-            else:
-                print(f"# {m.sig}: no static path to a {m.cls.name} object and no per-frame method to hook")
-                continue
+        r = await receiver(m)
+        if not r:
+            continue
+        target, note = r[0] + m.name, r[1]
         members = real_values(et) if et.kind == "enum" else [(f"id{v}", v) for v in range(1, 6)]
         print(f"\n# {m.sig} RVA {m.rva:#x} [{note}], id = {args[id_i][0]} {args[id_i][1]}" + (f", count = {args[cnt_i][1]}" if cnt_i is not None else ""))
+        if members:                                      # one rule for every item: the id is an editable cell (enum members = their numbers)
+            vals = [f"${members[0][0]}" if i == id_i and et.kind == "enum" else f"${members[0][1]}" if i == id_i else f"${a.amount}" if i == cnt_i
+                    else "0" if pt in PRIM or pt in INTS else "null" for i, (pt, pn) in enumerate(args)]
+            print(f'"Any {et.name if et.kind == "enum" else "item"} (edit the value)=call:{target}({", ".join(vals)})"'
+                  + (f"   # {', '.join(f'{n}={v}' for n, v in members[:8])}{' ...' if len(members) > 8 else ''}" if et.kind == "enum" else ""))
         for name, v in members if a.all or shown else members[:5]:
             vals = []
             for i, (pt, pn) in enumerate(args):
@@ -195,6 +241,32 @@ async def amain(a):
         if not a.all and len(members) > 5:
             print(f"# ... {len(members) - 5} more members of {et.full} (--all)")
         shown += 1
+    # methods that take the item as an object (AddItem(ItemData, int)): the object comes from a list / array / dictionary of
+    # such objects in the static tree, element picked by an editable cell -> one rule gives any item of the game
+    done = []
+    for m, why in rejected[:12]:
+        objs = [(i, pt) for i, (pt, pn) in enumerate(m.args) if pt not in PRIM and pt not in INTS and (ot := res.find_type(pt)) and ot.kind == "class"]
+        if not objs:
+            continue
+        colls = {}
+        for i, pt in objs:
+            c = await collection_path(res, rt, read, rt.base, res.find_type(pt))
+            if c:
+                colls[i] = c
+        if len(colls) != len(objs):
+            continue
+        r = await receiver(m)
+        if not r:
+            continue
+        vals = []
+        for i, (pt, pn) in enumerate(m.args):
+            et = res.find_type(pt)
+            vals.append(colls[i][0] if i in colls else f"${a.amount}" if pt in INTS and COUNT_PARAM.search(pn) else "0" if pt in PRIM or pt in INTS
+                        else f"${next(iter(real_values(et)), ('0', 0))[0]}" if et and et.kind == "enum" else "null")
+        print(f"\n# {m.sig} RVA {m.rva:#x} [{r[1]}], " + ", ".join(f"{m.args[i][0]} {m.args[i][1]} = element of {p} ({n} in the dump, 0..{n - 1})" for i, (p, n) in colls.items()))
+        print(f'"Any {m.args[objs[0][0]][0]} (edit the index)=call:{r[0]}{m.name}({", ".join(vals)})"')
+        done.append(m)
+    rejected = [(m, why) for m, why in rejected if m not in done]
     if rejected and not a.method:
         print("\n# give-like methods a trainer cannot call as is (object parameters need a path to an existing object, see README):")
         for m, why in rejected[:12]:
