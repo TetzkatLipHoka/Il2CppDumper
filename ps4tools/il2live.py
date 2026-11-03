@@ -37,16 +37,50 @@ MODS = {"public", "private", "internal", "protected", "static", "readonly", "con
 TYPE_RE = re.compile(r"^(?P<mods>(?:\w+\s+)*?)(?P<kind>class|struct|enum|interface)\s+(?P<name>[^\s<]+(?:<[^>]*>)?)(?:\s*:\s*(?P<bases>.*?))?\s*// TypeDefIndex: (?P<idx>\d+)")
 IMAGE_RE = re.compile(r"^// Image \d+: (?P<name>\S+) - (?P<start>\d+)")
 FIELD_RE = re.compile(r"^\t(?P<decl>.+?)(?: = (?P<val>.*?))?; // 0x(?P<off>[0-9A-Fa-f]+)$")
-METHOD_RE = re.compile(r"^\t(?P<vis>public|private|protected|internal)[\w ]*? void (?P<name>\w+)\(\) \{ \}$")   # parameterless void: hook candidates
+METHOD_RE = re.compile(r"^\t(?P<mods>(?:(?:public|private|protected|internal|static|virtual|override|abstract|sealed|extern|new|unsafe) )+)(?P<ret>.+?) (?P<name>[\w.]+)\((?P<params>.*)\) \{ \}$")
+RVA_RE = re.compile(r"^\t// RVA: (?P<rva>-?(?:0x)?[0-9A-Fa-f]+) ")
+CONST_RE = re.compile(r"^\tpublic const \S+ (?P<name>\w+) = (?P<val>-?\d+);$")
 
 
 # ---- dump.cs ---------------------------------------------------------------------------------------------------
+class Method:
+    __slots__ = ("name", "rva", "static", "ret", "params", "vis", "cls")
+
+    def __init__(self, name, rva, static, ret, params, vis, cls):
+        self.name, self.rva, self.static, self.ret, self.params, self.vis, self.cls = name, rva, static, ret, params, vis, cls
+
+    @property
+    def args(self):
+        """[(type, name)] without default values; commas inside <> stay in the type."""
+        out, depth, cur = [], 0, ""
+        for ch in self.params:
+            depth += ch in "<[("; depth -= ch in ">])"
+            if ch == "," and depth == 0:
+                out.append(cur); cur = ""
+            else:
+                cur += ch
+        out.append(cur)
+        res = []
+        for p in out:
+            p = p.split("=")[0].strip()
+            if p:
+                t, _, n = p.rpartition(" ")
+                res.append((t.strip(), n))
+        return res
+
+    @property
+    def sig(self):
+        return f"{self.cls.full}.{self.name}({self.params})"
+
+
 class Type:
     def __init__(self, kind, name, ns, bases, idx):
         self.kind, self.name, self.ns, self.bases, self.idx = kind, name, ns, bases, idx
         self.fields, self.statics, self.enum_base = {}, {}, "int"      # offset -> (type, name)
         self.order, self.sorder = [], []                                # (type, name) in declaration order, instance / static
         self.methods = {}                                               # parameterless void methods: name -> visibility
+        self.sigs = {}                                                  # method name -> [Method] (only methods with code)
+        self.consts = {}                                                # enum: member name -> value
         self.image = ""
 
     @property
@@ -56,7 +90,7 @@ class Type:
 
 def parse_dump_cs(path):
     """-> {full name: Type}; full name = Namespace.Outer.Inner"""
-    types, ns, cur, images, section = {}, "", None, [], "fields"
+    types, ns, cur, images, section, rva = {}, "", None, [], "fields", -1
     for line in open(path, encoding="utf-8", errors="replace"):
         line = line.rstrip("\r\n")
         m = IMAGE_RE.match(line)
@@ -77,12 +111,22 @@ def parse_dump_cs(path):
         if line.startswith("\t// Properties"):
             section = "properties"; continue
         if section == "methods":
-            m = METHOD_RE.match(line)
+            m = RVA_RE.match(line)
             if m:
-                cur.methods[m["name"]] = m["vis"]
+                rva = int(m["rva"], 0); continue
+            m = METHOD_RE.match(line)
+            if m and rva > 0:
+                mods = m["mods"].split()
+                vis = next((x for x in mods if x in ("public", "private", "protected", "internal")), "private")
+                cur.sigs.setdefault(m["name"], []).append(Method(m["name"], rva, "static" in mods, m["ret"], m["params"], vis, cur))
+                if m["ret"] == "void" and not m["params"] and "static" not in mods:
+                    cur.methods[m["name"]] = vis
+            rva = -1
             continue
         if section == "properties":
             continue
+        if cur.kind == "enum" and (m := CONST_RE.match(line)):
+            cur.consts[m["name"]] = int(m["val"]); continue
         m = FIELD_RE.match(line)
         if m:
             off = int(m["off"], 16)
@@ -441,6 +485,44 @@ class Runtime:
         return await read_u64(read, klass + KLASS_STATICS), klass
 
 
+def instances(rt, dump):
+    """{klass: [object addresses]} over all dumped regions (cached on rt). An object start is a klass pointer whose next
+    qword is the monitor (0 or a pointer outside the module) and whose fourth qword does not point into the metadata: that
+    drops the MethodInfo (klass at +0x20, return_type at +0x28 in the module), FieldInfo (klass at +0x10, offset|token after
+    it) and PropertyInfo (klass at +0, name at +0x18 in the metadata) structures; regions that hold Il2CppClass structs
+    themselves (metadata pools, full of klass refs in typeHierarchy/parent/castClass) are skipped. Region names alone do
+    not separate heap and pools on every platform (PS4: dlmalloc_extra, PS5 Unity 6: ScriptingGetMem, pools unnamed)."""
+    if getattr(rt, "_instances", None) is not None:
+        return rt._instances
+    mods = [(r["start"], r["end"]) for r in dump.regs if (r["name"] or "").endswith((".prx", ".sprx", ".elf", "eboot.bin"))]
+    meta = next((r for r in dump.regs if r["start"] <= rt.meta < r["end"]), None)
+    pools = set((np.searchsorted(dump.starts, rt.klass_arr, side="right") - 1).tolist())
+    out = {}
+    for r, a in dump.arrays():
+        if any(lo <= r["start"] < hi for lo, hi in mods) or r["name"] == "executable" or len(a) < 4 or dump.regs.index(r) in pools:
+            continue
+        idx = np.nonzero(np.isin(a[:-3], rt.klass_arr))[0]
+        if len(idx) == 0:
+            continue
+        mon, fourth = a[idx + 1], a[idx + 3]
+        ok = mon == 0
+        for lo, hi in mods:
+            ok |= (mon >= np.uint64(0x10000)) & ~((mon >= lo) & (mon < hi))
+        if meta:
+            ok &= ~((fourth >= meta["start"]) & (fourth < meta["end"]))
+        for i in idx[ok].tolist():
+            out.setdefault(int(a[i]), []).append(r["start"] + i * 8)
+    rt._instances = out
+    return out
+
+
+def instances_of(res, rt, dump, t):
+    """Objects of dump.cs type t and its subclasses in the dump, sorted by address."""
+    inst = instances(rt, dump)
+    ks = [k for c in res.types.values() if any(x is t for x in res.chain(c)) for k in rt.by_full.get(c.full, [])]
+    return sorted(a for k in ks for a in inst.get(k, []))
+
+
 # ---- path resolution -------------------------------------------------------------------------------------------------
 class Resolver:
     def __init__(self, rt):
@@ -518,10 +600,34 @@ class Resolver:
                     return off, ft, c
         return None
 
+    def method(self, t, name, nargs=None, types=None):
+        """Method `name` of t or a base class (overloads by argument count / parameter type list); exits with the
+        candidates when ambiguous or absent."""
+        for c in self.chain(t):
+            ms = c.sigs.get(name, [])
+            if types is not None:
+                ms = [m for m in ms if [a[0] for a in m.args] == types]
+            elif nargs is not None:
+                ms = [m for m in ms if len(m.args) == nargs]
+            if len(ms) == 1:
+                return ms[0]
+            if ms:
+                sys.exit(f"{c.full}.{name} is overloaded, name the parameter types: " + ", ".join(f"{name}({', '.join(a[0] for a in m.args)})" for m in ms))
+        sys.exit(f"{t.full} has no method {name} with code" + (f" taking {nargs} arguments" if nargs is not None else ""))
+
     def tokens(self, path):
+        """Root forms: Class::field (static), this.field (il2cheat: the hooked object), Class#n.field (n-th object of
+        the class in the dump; offline inspection, the address is only valid for the session of the dump)."""
         head, sep, rest = path.partition("::")
         if not sep:
-            sys.exit("path must start at a static field: Class::field...")
+            head, sep, rest = path.partition(".")
+            if head == "this":
+                head = ("this",)
+            elif "#" in head and head.split("#")[1].isdigit():
+                head = ("inst", head.split("#")[0], int(head.split("#")[1]))
+            else:
+                sys.exit("path must start at a static field (Class::field), the hooked object (this.field) or an object of a class (Class#0.field)")
+            rest = "." + rest
         # split on "." only outside [] / {} so keys like {Type=A.B.C} survive
         parts, buf, depth = [], "", 0
         for ch in rest:
@@ -536,8 +642,11 @@ class Resolver:
                 buf += ch
         parts.append(buf)
         first = parts[0]
-        segs = [("static", head, first.split("[")[0].split("{")[0])]
-        tail = first[len(segs[0][2]):]
+        if isinstance(head, tuple):                                   # object root: every part is an ordinary segment
+            segs, tail = [("obj", head)], ""
+        else:
+            segs = [("static", head, first.split("[")[0].split("{")[0])]
+            tail = first[len(segs[0][2]):]
         for s in [tail] + parts[1:]:
             m = re.match(r"^([A-Za-z_<>,`0-9 ]*)((?:\[[^\]]*\]|\{[^}]*\}|:[A-Za-z_.0-9]+)*)$", s)
             if not m:
@@ -560,26 +669,42 @@ def elem_size(res, tname):
     return 8
 
 
-async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
+async def follow(res, rt, read, base, path, auto_cast=True, trace=None, this_obj=None):
     """Resolve the path; returns (address of the final field, type string). read(va, n) -> bytes or None,
-    base = module base in the process being read (dump or live)."""
+    base = module base in the process being read (dump or live), this_obj = the object a 'this.' path starts at."""
     segs = res.tokens(path)
-    kind, cls_name, sname = segs[0]
-    t = res.find_type(cls_name)
-    if not t:
-        sys.exit(f"class {cls_name} not in dump.cs")
-    hit = res.static_field(t, sname)
-    if not hit:
-        sys.exit(f"{t.full} has no static field {sname}; statics: {[fn for c in res.chain(t) for _, (_, fn) in c.statics.items()]}")
-    hops, off, ftype, owner = hit
-    statics, k = await rt.statics_live(read, base, t, hops)
-    if not k:
-        sys.exit(f"{t.full} is not initialized in the process yet")
-    if not statics:
-        sys.exit(f"{owner.full} has no static field block")
-    addr = statics + off
-    if trace is not None:
-        trace.append(f"{t.full}::{sname} @ {addr:#x} ({ftype}) klass {k:#x}" + (f" ({owner.full}, {hops} parent hops)" if hops else ""))
+    root = None                                      # object root (this / Class#n): the object itself, not a slot holding it
+    if segs[0][0] == "obj":
+        head = segs[0][1]
+        if head[0] == "this":
+            root = this_obj or sys.exit("a 'this.' path needs the hooked object (il2cheat); in il2live use Class#n.field")
+        else:
+            t = res.find_type(head[1]) or sys.exit(f"class {head[1]} not in dump.cs")
+            objs = instances_of(res, rt, rt.d, t)
+            if head[2] >= len(objs):
+                sys.exit(f"{t.full} has {len(objs)} objects in the dump (--instances {t.name} lists them)")
+            root = objs[head[2]]
+        t = await rt.object_type_live(read, root) or sys.exit(f"no object at {root:#x} (the dump's address is not valid in this session)")
+        addr, ftype = None, t.full
+        if trace is not None:
+            trace.append(f"{path.split('.')[0]} = {t.full} object @ {root:#x}")
+    else:
+        kind, cls_name, sname = segs[0]
+        t = res.find_type(cls_name)
+        if not t:
+            sys.exit(f"class {cls_name} not in dump.cs")
+        hit = res.static_field(t, sname)
+        if not hit:
+            sys.exit(f"{t.full} has no static field {sname}; statics: {[fn for c in res.chain(t) for _, (_, fn) in c.statics.items()]}")
+        hops, off, ftype, owner = hit
+        statics, k = await rt.statics_live(read, base, t, hops)
+        if not k:
+            sys.exit(f"{t.full} is not initialized in the process yet")
+        if not statics:
+            sys.exit(f"{owner.full} has no static field block")
+        addr = statics + off
+        if trace is not None:
+            trace.append(f"{t.full}::{sname} @ {addr:#x} ({ftype}) klass {k:#x}" + (f" ({owner.full}, {hops} parent hops)" if hops else ""))
     cur_t = None                                     # type of the object we are inside, once dereferenced
     for op, arg in segs[1:]:
         if op == "cast":
@@ -589,7 +714,9 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None):
         if op in ("field", "index", "key"):
             base, gargs = split_generic(ftype)
             is_struct_inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype, cur_t.ns)) and ct.kind == "struct" and not ftype.endswith("[]")
-            if op == "field" and is_struct_inline:
+            if root is not None:
+                obj, cur_t, root = root, cur_t or t, None   # the root object itself: no pointer hop
+            elif op == "field" and is_struct_inline:
                 obj, cur_t = addr, ct                   # value type inline: no pointer hop
             else:
                 obj = await read_u64(read, addr)
@@ -965,6 +1092,55 @@ async def children(res, rt, read, path, addr, ftype):
     return out
 
 
+# ---- --methods: cheat-able methods by name (the ReaperPy values_auto idea) ------------------------------------------------
+CHEAT_WORDS = ("damage", "hurt", "hit", "die", "death", "kill", "spend", "pay", "consume", "decrease", "reduce", "subtract",
+               "lose", "cost", "drain", "deplete", "usestamina", "useammo", "usemana", "removeammo", "removemoney", "exptonextlevel",
+               "nextlevel", "addmoney", "addgold", "addcoins", "additem", "giveitem", "addammo", "heal", "unlock", "sethealth")
+PLAYERISH = re.compile(r"(?i)player|hero|character|avatar|local|protagonist|main|vitals|stats|wallet|inventory")
+ENEMYISH = re.compile(r"(?i)enemy|enemies|monster|boss|npc|mob\b|ai\b|zombie|minion|creep|hostile|foe")
+GAME_IMAGE_SKIP = ("mscorlib", "System", "Unity", "netstandard", "Mono.", "Newtonsoft", "DOTween", "TextMesh", "Rewired", "Sirenix", "Sentry",
+                   "OdinSerializer", "Cinemachine", "AK.", "Dreamteck", "FMOD", "Steamworks", "Facepunch", "Photon", "Mirror", "UniTask", "Zenject",
+                   "VContainer", "I2.", "Wwise", "Spine", "Ink", "Yarn", "FishNet", "Autodesk", "Google", "Firebase", "PlayFab", "Epic", "Sony")
+
+
+def main_images(types):
+    """The game's own assemblies: Assembly-CSharp plus the non-library image with the most types (MOUSE: Mouse.dll)."""
+    counts = {}
+    for t in types.values():
+        if not t.image.startswith(GAME_IMAGE_SKIP):
+            counts[t.image] = counts.get(t.image, 0) + 1
+    top = max(counts, key=counts.get).split(".")[0] if counts else None            # Mouse.dll, Mouse.Weapons.Data.dll, ...
+    return {"Assembly-CSharp.dll"} | {i for i in counts if top and i.split(".")[0] == top}
+
+
+def methods(res, rt, dump, word):
+    """Methods with code whose name matches `word` (token match, wildcards like --find; empty: the usual cheat targets),
+    game assemblies first, then classes with live objects. Static methods are callable without an object; instance
+    methods need a path to one (il2cheat: this. or Class::static...). Patch hints: a void method -> noop, bool -> true/false."""
+    inst = instances(rt, dump)
+    words = [word] if word else list(CHEAT_WORDS)
+    rows = []
+    for t in res.types.values():
+        if t.kind not in ("class", "struct") or "<" in t.name:
+            continue
+        game = not t.image.startswith(GAME_IMAGE_SKIP)
+        n = sum(len(inst.get(k, [])) for k in rt.by_full.get(t.full, []))
+        for name, ms in t.sigs.items():
+            if "<" in name or name in (".ctor", ".cctor") or not any(word_in(w, name) for w in words):
+                continue
+            for m in ms:
+                tag = "player" if PLAYERISH.search(t.name) else "enemy" if ENEMYISH.search(t.name) else ""
+                ovl = f"({', '.join(a[0] for a in m.args)})" if len(ms) > 1 else ""
+                hint = (f"patch:{t.name}.{name}{ovl}=noop" if m.ret == "void" else f"patch:{t.name}.{name}{ovl}=true" if m.ret == "bool"
+                        else f"patch:{t.name}.{name}{ovl}=<value>" if m.ret in PRIM else "")
+                if m.static and m.ret == "void":
+                    hint = f"call:{t.name}.{name}({', '.join('<' + a[1] + '>' for a in m.args)})"
+                rows.append((not game, n == 0, -n, t.full, name, f"{n}\t{tag}\t{'static ' if m.static else ''}{m.ret} {t.full}.{name}({m.params})\tRVA {m.rva:#x}\t{hint}"))
+    for r in sorted(rows)[:2000]:
+        print(r[-1])
+    print(f"# {len(rows)} methods; columns: live objects of the class, player/enemy by class name, signature, RVA, il2cheat spec hint", file=sys.stderr)
+
+
 # ---- main ---------------------------------------------------------------------------------------------------------------
 async def game_pid(dbg):
     """PID of the running game: eboot.bin, else the single process whose title id starts with CUSA/PPSA.
@@ -1012,19 +1188,40 @@ async def amain(a):
     if a.find:
         await find(res, rt, read, base, a.find, a.depth, types=set(a.types.split(",")) if a.types else None, objects=a.objects)
         return
+    if a.methods is not None:
+        methods(res, rt, dump, a.methods)
+        return
+    if a.instances:
+        t = res.find_type(a.instances) or sys.exit(f"class {a.instances} not in dump.cs")
+        objs = instances_of(res, rt, dump, t)
+        for n, o in enumerate(objs):
+            ot = rt.object_type(o)
+            print(f"{t.name}#{n}\t{ot.full if ot else '?'}\t@ {o:#x}")
+        print(f"# {len(objs)} objects of {t.full} (and subclasses) in the dump; addresses are valid for the dump's session only", file=sys.stderr)
+        return
     trace = []
-    addr, ftype = await follow(res, rt, read, base, a.path, trace=trace)
-    for line in trace:
-        print("  " + line, file=sys.stderr)
-    if addr is None:
-        sys.exit(f"path ends early: {ftype}")
-    val = await read_value(res, read, addr, ftype)
-    print(f"{a.path}\t{ftype}\t{val}\t@ {addr:#x}")
+    if re.fullmatch(r"[\w.]+#\d+", a.path):                 # bare object: its fields
+        addr, ftype, a.fields = None, None, True
+        cls, n = a.path.rsplit("#", 1)
+        t = res.find_type(cls) or sys.exit(f"class {cls} not in dump.cs")
+        objs = instances_of(res, rt, dump, t)
+        obj = objs[int(n)] if int(n) < len(objs) else sys.exit(f"{t.full} has {len(objs)} objects in the dump")
+        print(f"{a.path}\t{t.full}\t@ {obj:#x}")
+    else:
+        addr, ftype = await follow(res, rt, read, base, a.path, trace=trace)
+        for line in trace:
+            print("  " + line, file=sys.stderr)
+        if addr is None:
+            sys.exit(f"path ends early: {ftype}")
+        val = await read_value(res, read, addr, ftype)
+        print(f"{a.path}\t{ftype}\t{val}\t@ {addr:#x}")
     if a.fields:                                          # the fields of the object the path points to (or contains)
-        obj = addr if value_format(res, ftype) != "Q" else await read_u64(read, addr)
+        if addr is not None:
+            obj = addr if value_format(res, ftype) != "Q" else await read_u64(read, addr)
         t = await rt.object_type_live(read, obj) if obj else None
         if not t:
             sys.exit(f"{ftype} is not an object")
+        ftype = ftype or t.full
         for c in res.chain(t):
             for off, (ft, fn) in sorted(c.fields.items()):
                 ft = res.subst(ftype, c, ft)
@@ -1059,7 +1256,10 @@ if __name__ == "__main__":
     ap.add_argument("--types", help="--find: only fields of these types, comma separated (e.g. int,float,double)")
     ap.add_argument("--objects", action="store_true", help="--find: also list matching object fields with class and address")
     ap.add_argument("--fields", action="store_true", help="path: also list every field of the object the path points to, with values")
+    ap.add_argument("--methods", nargs="?", const="", help="list methods with code whose name contains the word (token match like --find; "
+                    "no word: the usual cheat targets - damage, spend, consume, ...), classes with live objects first; the last column is a ready il2cheat spec")
+    ap.add_argument("--instances", help="list the objects of a class (and subclasses) in the dump as Class#n paths")
     a = ap.parse_args()
-    if not a.path and not a.find:
-        ap.error("path or --find required")
+    if not a.path and not a.find and a.methods is None and not a.instances:
+        ap.error("path, --find, --methods or --instances required")
     asyncio.run(amain(a))
