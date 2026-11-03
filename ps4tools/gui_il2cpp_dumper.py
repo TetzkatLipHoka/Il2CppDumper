@@ -336,6 +336,11 @@ GI_TR = {
         "g_given": "Done: the game accepted {n} call(s).", "g_failed": "Not done - see the log below the main window for the reason.",
         "g_prep": "Preparing the function (receiver + items) ...", "g_ready": "ready: receiver {r}", "g_notready": "not callable yet: {w}",
         "g_nolist": "no list: type the id in 'Item / id' or press 'Find in dump'",
+        "g_enumq": "Find enum:", "g_allenums": "search the members of ALL enums", "g_direct": " 3. Direct rules (no item list needed) ",
+        "g_patch_lbl": "Patch the selected function, force its return value to:", "g_patch_btn": "🩹 Add patch rule", "g_mrule": "Manual rule:", "g_rname": "Name", "g_rpath": "Path", "g_rvalue": "Value",
+        "g_rbtn": "➕ Add rule", "g_main": "⬆ Rules list (main window)", "g_pvoid": "A void method can only be skipped: use noop.", "g_pbool": "This method returns bool: use true or false.",
+        "g_pnum": "This method returns a number: type a number.", "g_pobj": "A method that returns an object / struct cannot be forced.", "g_needf": "Type something in Filter to search all enums.", "g_mneed": "Fill in name, path and value.",
+        "g_all_hint": "{n} matches in all enums", "g_c_enum": "Enum",
         "g_c_recv": "Receiver (by types)", "g_noitemfn": "This function takes no item: it is called as it is (amount only if it has one).", "g_sugg": "suggested receiver (from the field types, not checked in memory): {p}", "g_nopath": "no static path leads to this class (it is a scene object): the game must create it first.",
     },
     "Español": {
@@ -354,6 +359,11 @@ GI_TR = {
         "g_given": "Hecho: el juego aceptó {n} llamada(s).", "g_failed": "No se pudo - mira el log bajo la ventana principal para ver el motivo.",
         "g_prep": "Preparando la función (receptor + items) ...", "g_ready": "lista: receptor {r}", "g_notready": "aún no se puede llamar: {w}",
         "g_nolist": "sin lista: escribe el id en 'Item / id' o pulsa 'Buscar en el dump'",
+        "g_enumq": "Buscar enum:", "g_allenums": "buscar miembros en TODOS los enums", "g_direct": " 3. Reglas directas (sin lista de items) ",
+        "g_patch_lbl": "Patch de la función elegida, forzar que devuelva:", "g_patch_btn": "🩹 Añadir regla patch", "g_mrule": "Regla manual:", "g_rname": "Nombre", "g_rpath": "Ruta", "g_rvalue": "Valor",
+        "g_rbtn": "➕ Añadir regla", "g_main": "⬆ Lista de reglas (ventana principal)", "g_pvoid": "Un método void solo se puede saltar: usa noop.", "g_pbool": "Este método devuelve bool: usa true o false.",
+        "g_pnum": "Este método devuelve un número: escribe un número.", "g_pobj": "No se puede forzar un método que devuelve un objeto / struct.", "g_needf": "Escribe algo en Filtro para buscar en todos los enums.", "g_mneed": "Rellena nombre, ruta y valor.",
+        "g_all_hint": "{n} coincidencias en todos los enums", "g_c_enum": "Enum",
         "g_c_recv": "Receptor (por tipos)", "g_noitemfn": "Esta función no recibe item: se llama tal cual (con cantidad solo si la tiene).", "g_sugg": "receptor sugerido (por los tipos de los campos, sin comprobar en memoria): {p}", "g_nopath": "ninguna ruta estática llega a esta clase (es un objeto de escena): el juego tiene que crearlo antes.",
     },
     "Deutsch": {
@@ -372,6 +382,11 @@ GI_TR = {
         "g_given": "Fertig: das Spiel hat {n} Aufruf(e) akzeptiert.", "g_failed": "Nicht geklappt - Grund im Log unter dem Hauptfenster.",
         "g_prep": "Bereite die Funktion vor (Empfänger + Items) ...", "g_ready": "bereit: Empfänger {r}", "g_notready": "noch nicht aufrufbar: {w}",
         "g_nolist": "keine Liste: ID bei 'Item / ID' eintippen oder 'Im Dump suchen'",
+        "g_enumq": "Enum suchen:", "g_allenums": "Member ALLER Enums durchsuchen", "g_direct": " 3. Direkte Regeln (ohne Item-Liste) ",
+        "g_patch_lbl": "Patch der gewählten Funktion, Rückgabewert erzwingen:", "g_patch_btn": "🩹 Patch-Regel hinzufügen", "g_mrule": "Manuelle Regel:", "g_rname": "Name", "g_rpath": "Pfad", "g_rvalue": "Wert",
+        "g_rbtn": "➕ Regel hinzufügen", "g_main": "⬆ Regelliste (Hauptfenster)", "g_pvoid": "Eine void-Methode kann nur übersprungen werden: noop.", "g_pbool": "Diese Methode liefert bool: true oder false.",
+        "g_pnum": "Diese Methode liefert eine Zahl: Zahl eingeben.", "g_pobj": "Eine Methode mit Objekt-/Struct-Rückgabe kann nicht erzwungen werden.", "g_needf": "Bei Filter etwas eintippen, um alle Enums zu durchsuchen.", "g_mneed": "Name, Pfad und Wert ausfüllen.",
+        "g_all_hint": "{n} Treffer in allen Enums", "g_c_enum": "Enum",
         "g_c_recv": "Empfänger (nach Typen)", "g_noitemfn": "Diese Funktion nimmt kein Item: sie wird unverändert aufgerufen.", "g_sugg": "vorgeschlagener Empfänger (nach Feldtypen, nicht im Speicher geprüft): {p}", "g_nopath": "kein statischer Pfad führt zu dieser Klasse (Szenenobjekt): das Spiel muss es erst erzeugen.",
     },
 }
@@ -1452,8 +1467,8 @@ class IL2CppDumperGUI:
         it = self.itr
         win = self.items_win = tk.Toplevel(self.root)
         win.title(it("win_title"))
-        win.geometry("1100x800")
-        win.minsize(860, 600)
+        win.geometry("1100x900")
+        win.minsize(860, 640)
         self.items_status = tk.StringVar(value=it("status_idle"))
         ttk.Label(win, textvariable=self.items_status, foreground="#4ec9b0", font=("Arial", 9, "italic")).pack(fill="x", padx=10, pady=(6, 0))
         ttk.Label(win, text=it("msg_note"), foreground="#808080", wraplength=960, justify="left").pack(fill="x", padx=10, pady=(0, 4))
@@ -1528,7 +1543,8 @@ class IL2CppDumperGUI:
         it = self.itr
         self.gi_rows, self.gi_enums, self.gi_fn, self.gi_cat, self.gi_args = [], {}, None, [], []
         self.gi_vars = dict(search=tk.StringVar(), all=tk.BooleanVar(value=False), recv=tk.StringVar(), amount=tk.StringVar(value="1"),
-                            manual=tk.StringVar(), efilter=tk.StringVar(), enum=tk.StringVar(), info=tk.StringVar(), shown=tk.StringVar(), hint=tk.StringVar())
+                            manual=tk.StringVar(), efilter=tk.StringVar(), enum=tk.StringVar(), info=tk.StringVar(), shown=tk.StringVar(), hint=tk.StringVar(),
+                            enumq=tk.StringVar(), allenums=tk.BooleanVar(value=False), pmode=tk.StringVar(value="true"), rname=tk.StringVar(), rpath=tk.StringVar(), rvalue=tk.StringVar())
         v = self.gi_vars
         t = ttk.Frame(nb)
         nb.add(t, text=it("tab_give"))
@@ -1567,11 +1583,17 @@ class IL2CppDumperGUI:
         self.gi_combo = ttk.Combobox(bar2, textvariable=v["enum"], width=46, state="readonly")
         self.gi_combo.pack(side="left", padx=4)
         self.gi_combo.bind("<<ComboboxSelected>>", lambda e: self.gi_enum_changed())
-        ttk.Label(bar2, text=it("lbl_filter")).pack(side="left", padx=(10, 0))
-        ttk.Entry(bar2, textvariable=v["efilter"], width=18).pack(side="left", padx=4)
+        ttk.Label(bar2, text=it("g_enumq")).pack(side="left", padx=(10, 0))
+        ttk.Entry(bar2, textvariable=v["enumq"], width=16).pack(side="left", padx=4)
+        v["enumq"].trace_add("write", lambda *a: self.gi_enumq_changed())
+        ttk.Checkbutton(bar2, text=it("g_allenums"), variable=v["allenums"], command=self.gi_fill_items).pack(side="left", padx=10)
+        bar2b = ttk.Frame(f2)
+        bar2b.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(bar2b, text=it("lbl_filter")).pack(side="left")
+        ttk.Entry(bar2b, textvariable=v["efilter"], width=30).pack(side="left", padx=4)
         v["efilter"].trace_add("write", lambda *a: self.gi_fill_items())
-        ttk.Label(bar2, textvariable=v["hint"], foreground="#808080").pack(side="left", padx=8)
-        self.gi_itree = tree(f2, [("name", it("col_name"), 330), ("value", "=", 560)])
+        ttk.Label(bar2b, textvariable=v["hint"], foreground="#808080").pack(side="left", padx=8)
+        self.gi_itree = tree(f2, [("name", it("col_name"), 300), ("value", "=", 140), ("enum", it("g_c_enum"), 420)])
         self.gi_itree.configure(height=7)
         self.gi_itree.bind("<Double-1>", lambda e: self.gi_add_rules())
         # --- actions
@@ -1584,6 +1606,25 @@ class IL2CppDumperGUI:
         ttk.Button(act, text=it("g_give"), command=self.gi_give_now).pack(side="left", padx=(12, 4))
         ttk.Button(act, text=it("g_rule"), command=self.gi_add_rules).pack(side="left", padx=4)
         ttk.Button(act, text=it("g_copy"), command=self.gi_copy).pack(side="left", padx=4)
+        # --- 3. direct rules: patch of the selected function / a rule typed by hand
+        f3 = ttk.LabelFrame(t, text=it("g_direct"))
+        f3.pack(fill="x", padx=6, pady=(0, 6))
+        r1 = ttk.Frame(f3)
+        r1.pack(fill="x", padx=6, pady=3)
+        ttk.Label(r1, text=it("g_patch_lbl")).pack(side="left")
+        ttk.Combobox(r1, textvariable=v["pmode"], values=["true", "false", "noop", "0", "999"], width=8).pack(side="left", padx=4)
+        ttk.Button(r1, text=it("g_patch_btn"), command=self.gi_add_patch).pack(side="left", padx=4)
+        ttk.Button(r1, text=it("g_main"), command=lambda: (self.root.lift(), self.root.focus_force())).pack(side="right", padx=4)
+        r2 = ttk.Frame(f3)
+        r2.pack(fill="x", padx=6, pady=(0, 5))
+        ttk.Label(r2, text=it("g_mrule")).pack(side="left")
+        ttk.Label(r2, text=it("g_rname")).pack(side="left", padx=(6, 2))
+        ttk.Entry(r2, textvariable=v["rname"], width=16).pack(side="left")
+        ttk.Label(r2, text=it("g_rpath")).pack(side="left", padx=(6, 2))
+        ttk.Entry(r2, textvariable=v["rpath"], width=44).pack(side="left")
+        ttk.Label(r2, text=it("g_rvalue")).pack(side="left", padx=(6, 2))
+        ttk.Entry(r2, textvariable=v["rvalue"], width=10).pack(side="left")
+        ttk.Button(r2, text=it("g_rbtn"), command=self.gi_add_manual).pack(side="left", padx=6)
         self.root.after(200, lambda: self.gi_index(False))
 
     # -- index ---------------------------------------------------------------------------------------------------------------
@@ -1630,8 +1671,8 @@ class IL2CppDumperGUI:
         self.gi_enums = {e[0]: dict(full=e[0], name=e[1], members=e[2]) for e in data["enums"]}
         item_like = re.compile(r"(?i)item|weapon|ammo|inventor|loot|resource|equip|gear|armo|card|relic|potion|currenc|collect|material|ingredient|skill|upgrade")
         order = sorted(self.gi_enums.values(), key=lambda e: (not item_like.search(e["name"]), -len(e["members"])))
-        self.gi_combo["values"] = [f"{e['name']} ({len(e['members'])})   {e['full']}" for e in order]
-        self.gi_combo_keys = [e["full"] for e in order]
+        self.gi_combo_all = [(f"{e['name']} ({len(e['members'])})   {e['full']}", e["full"]) for e in order]
+        self.gi_enumq_changed()
         self.gi_vars["info"].set(self.itr("g_idx_ok").format(m=len(rows), e=len(order)))
         self.gi_fill_funcs()
         return True
@@ -1791,12 +1832,21 @@ class IL2CppDumperGUI:
             return
         self.gi_cur_enum = e
         skip = re.compile(r"(?i)^(none|count|max|min|length|numberof|num[a-z]*|total|last|first|invalid|unknown|default|size|end|begin|all)$")
-        self.gi_cat = [(n, str(val)) for n, val in e["members"] if not skip.match(n)]
+        self.gi_cat = [(n, str(val), full) for n, val in e["members"] if not skip.match(n)]
+        if full not in self.gi_combo_keys:
+            self.gi_vars["enumq"].set("")
         idx = self.gi_combo_keys.index(full) if full in self.gi_combo_keys else -1
         if idx >= 0:
             self.gi_combo.current(idx)
         self.gi_vars["hint"].set(self.itr("g_hint_enum").format(n=len(e["members"]), e=e["name"]))
         self.gi_fill_items()
+
+    def gi_enumq_changed(self):
+        """the enum combobox only lists the enums whose name matches the 'Find enum' text"""
+        q = self.gi_vars["enumq"].get().strip().lower()
+        rows = [(lab, full) for lab, full in getattr(self, "gi_combo_all", []) if not q or q in lab.lower()]
+        self.gi_combo["values"] = [lab for lab, _ in rows]
+        self.gi_combo_keys = [full for _, full in rows]
 
     def gi_enum_changed(self):
         i = self.gi_combo.current()
@@ -1807,9 +1857,25 @@ class IL2CppDumperGUI:
         tr = self.gi_itree
         tr.delete(*tr.get_children())
         w = self.gi_vars["efilter"].get().strip().lower()
-        for i, (n, val) in enumerate(self.gi_cat):
-            if not w or w in n.lower() or w in str(val).lower():
-                tr.insert("", "end", iid=str(i), values=(n, val))
+        shown = []
+        if self.gi_vars["allenums"].get():
+            if not w:
+                self.gi_vars["hint"].set(self.itr("g_needf"))
+            else:
+                for full, e in self.gi_enums.items():
+                    for n, val in e["members"]:
+                        if w in n.lower() or w in e["name"].lower():
+                            shown.append((n, str(val), full))
+                            if len(shown) >= 1500:
+                                break
+                    if len(shown) >= 1500:
+                        break
+                self.gi_vars["hint"].set(self.itr("g_all_hint").format(n=len(shown)))
+        else:
+            shown = [c for c in self.gi_cat if not w or w in c[0].lower() or w in str(c[1]).lower()]
+        self.gi_shown = shown
+        for i, (n, val, full) in enumerate(shown):
+            tr.insert("", "end", iid=str(i), values=(n, val, (self.gi_enums.get(full) or {}).get("full", "")))
 
     # -- prepared candidates (items.json written by legacy\il2items.py prepare) ----------------------------------------------------
     def gi_cand(self, r):
@@ -1829,7 +1895,7 @@ class IL2CppDumperGUI:
         p = next((x for x in cand["params"] if x.get("role") == "id"), None)
         if not p:
             return []
-        return [(c["name"], str(c.get("value", c.get("path", "")))) for c in (p.get("catalog") or [])]
+        return [(c["name"], str(c.get("value", c.get("path", ""))), "") for c in (p.get("catalog") or [])]
 
     def gi_prepare(self, then, use_entry):
         """legacy il2items prepare for the selected function; then(cand) runs when it is done."""
@@ -1881,11 +1947,12 @@ class IL2CppDumperGUI:
             return 1
 
     def gi_chosen(self):
-        """[(label, value)] of the selected rows, or the manual item."""
-        sel = [self.gi_cat[int(i)] for i in self.gi_itree.selection()]
+        """[(label, value, enum full name)] of the selected rows, or the manual item."""
+        shown = getattr(self, "gi_shown", [])
+        sel = [shown[int(i)] for i in self.gi_itree.selection() if int(i) < len(shown)]
         man = self.gi_vars["manual"].get().strip()
         if man and not sel:
-            sel = [(man, man)]
+            sel = [(man, man, "")]
         return sel
 
     def gi_specs(self, chosen):
@@ -1900,16 +1967,16 @@ class IL2CppDumperGUI:
             return None
         texts = [sv.get().strip() for sv in self.gi_args]
         uses_item = any("*" in t for t in texts)
-        editable = any("$*" in t for t in texts)                 # one rule, the item is a value cell in the trainer ($Member / $id)
-        if editable and chosen:
-            chosen = chosen[:1]
         if uses_item and not chosen:
             messagebox.showinfo("Items", self.itr("g_noitem"), parent=self.items_win)
             return None
         target = f"{recv}.{r['name']}" if not r["static"] else f"{r['cls']}.{r['name']}"
         manual = bool(self.gi_vars["manual"].get().strip()) and not self.gi_itree.selection()
         out = []
-        for label, val in (chosen if uses_item else [(r["name"], "")]):
+        editable = any("$*" in t for t in texts)                 # one rule, the item is a value cell in the trainer ($Member / $id)
+        if editable and chosen:
+            chosen = chosen[:1]
+        for label, val, ef in (chosen if uses_item else [(r["name"], "", "")]):
             exprs = []
             for t, p in zip(texts, r["params"]):
                 if t == "$":
@@ -1918,15 +1985,58 @@ class IL2CppDumperGUI:
                     if p[3] == "string":
                         messagebox.showinfo("Items", self.itr("g_nostr"), parent=self.items_win)
                         return None
-                    if p[3] == "enum" and not (manual and str(val).lstrip("-").isdigit()):
+                    if p[3] == "enum" and not manual and ef and ef == p[4]:
+                        sub = f"{p[0]}.{label}"
+                    elif p[3] == "enum" and manual and not str(val).lstrip("-").isdigit():
                         sub = f"{p[0]}.{label}"
                     else:
                         sub = str(val)
                     t = t.replace("*", sub)
                 exprs.append(t)
-            name = f"Any {self.gi_vars['enum'].get().split(' ')[0] or 'item'} (edit the value)" if editable else ("Give " + label) if uses_item else r["name"]
+            if editable:
+                name = f"Any {(ef or self.gi_vars['enum'].get()).split(' ')[0].rsplit('.', 1)[-1] or 'item'} (edit the value)"
+            else:
+                name = ("Give " + label) if uses_item else r["name"]
             out.append((name, f"call:{target}({', '.join(exprs)})"))
         return out
+
+    def gi_add_patch(self):
+        r = self.gi_fn
+        if not r:
+            messagebox.showinfo("Items", self.itr("g_nofn"), parent=self.items_win)
+            return
+        mode = self.gi_vars["pmode"].get().strip().lower()
+        ret = r["ret"]
+        if ret == "void":
+            if mode != "noop":
+                messagebox.showinfo("Items", self.itr("g_pvoid"), parent=self.items_win)
+                return
+        elif ret == "bool":
+            if mode not in ("true", "false"):
+                messagebox.showinfo("Items", self.itr("g_pbool"), parent=self.items_win)
+                return
+        elif ret in ("int", "uint", "long", "ulong", "short", "ushort", "byte", "sbyte", "float", "double"):
+            try:
+                float(mode)
+            except ValueError:
+                messagebox.showinfo("Items", self.itr("g_pnum"), parent=self.items_win)
+                return
+        else:
+            messagebox.showinfo("Items", self.itr("g_pobj"), parent=self.items_win)
+            return
+        over = "/" in r["fn"].rsplit(".", 1)[-1]
+        target = f"{r['cls']}.{r['name']}" + (f"({', '.join(p[0] for p in r['params'])})" if over else "")
+        n = self._add_rule_rows([(f"{r['name']} ({mode})", "patch:" + target, mode)])
+        messagebox.showinfo("Items", self.itr("msg_added").format(n=n), parent=self.items_win)
+
+    def gi_add_manual(self):
+        v = self.gi_vars
+        name, path, val = v["rname"].get().strip(), v["rpath"].get().strip(), v["rvalue"].get().strip()
+        if not name or not path or (not val and not path.startswith("call:")):
+            messagebox.showinfo("Items", self.itr("g_mneed"), parent=self.items_win)
+            return
+        n = self._add_rule_rows([(name, path, val)])
+        messagebox.showinfo("Items", self.itr("msg_added").format(n=n), parent=self.items_win)
 
     def gi_add_rules(self):
         specs = self.gi_specs(self.gi_chosen())
@@ -1972,7 +2082,7 @@ class IL2CppDumperGUI:
                 messagebox.showwarning("Items", self.itr("g_notready").format(w=(cand or {}).get("why") or "?"), parent=self.items_win)
                 return
             has_id = any(p.get("role") == "id" for p in cand["params"])
-            toks = [f"{(lab or '').replace('=', '-')}={amt}" for lab, _ in chosen] if has_id else [str(amt)]
+            toks = [f"{(lab or '').replace('=', '-')}={amt}" for lab, *_ in chosen] if has_id else [str(amt)]
             if has_id and not chosen:
                 messagebox.showinfo("Items", self.itr("g_noitem"), parent=self.items_win)
                 return
@@ -2255,6 +2365,7 @@ class IL2CppDumperGUI:
         """il2cheat spec of a rule row: Name=path=value | Name=patch:Class.Method=mode | Name=call:Path.Method(args) (no value cell)."""
         if not n or not p or p.startswith("hook:"):            # hook:Class row = --hook, not a cheat
             return None
+        n = n.replace("=", "-").strip()                    # il2cheat splits the spec at the first "=": a name may not contain one
         if p.startswith("call:"):
             return f"{n}={p}"
         return f"{n}={p}={v}" if v else None
