@@ -1,4 +1,4 @@
-"""Tk front end for ps4dump.py, il2mem.py, il2live.py, il2cheat.py and il2diff.py (Unity IL2CPP). By talixme, beta.
+"""Tk front end for ps4dump.py, il2mem.py, il2live.py, il2cheat.py, il2diff.py and il2items.py (Unity IL2CPP). By talixme, beta.
     python gui_il2cpp_dumper.py
 """
 import json
@@ -37,7 +37,7 @@ TRANSLATIONS = {
         "btn_open_diff": "📊 Open Diff Tool",
         "frame_cheat": " 2. IL2CPP Cheat Generator (il2cheat.py) ",
         "lbl_dump_file": "Game Session Folder:",
-        "lbl_cheat_cmd": "Rules (Saved per game):",
+        "lbl_cheat_cmd": "Rules (saved per game; a row with path hook:Class = --hook for this. paths):",
         "th_name": "Name",
         "th_path": "IL2CPP Path / Static Root",
         "th_value": "Value",
@@ -125,7 +125,7 @@ TRANSLATIONS = {
         "btn_open_diff": "📊 Herramienta Diff",
         "frame_cheat": " 2. Generador de Cheats IL2CPP (il2cheat.py) ",
         "lbl_dump_file": "Carpeta de Sesión del Juego:",
-        "lbl_cheat_cmd": "Reglas (Guardadas por juego):",
+        "lbl_cheat_cmd": "Reglas (guardadas por juego; una fila con ruta hook:Clase = --hook para rutas this.):",
         "th_name": "Nombre",
         "th_path": "Ruta IL2CPP / Static Root",
         "th_value": "Valor",
@@ -213,7 +213,7 @@ TRANSLATIONS = {
         "btn_open_diff": "📊 Diff-Tool öffnen",
         "frame_cheat": " 2. IL2CPP Cheat Generator (il2cheat.py) ",
         "lbl_dump_file": "Spiel-Sitzungsordner:",
-        "lbl_cheat_cmd": "Regeln (Pro Spiel gespeichert):",
+        "lbl_cheat_cmd": "Regeln (pro Spiel gespeichert; eine Zeile mit Pfad hook:Klasse = --hook für this.-Pfade):",
         "th_name": "Name",
         "th_path": "IL2CPP Pfad / Static Root",
         "th_value": "Wert",
@@ -275,6 +275,203 @@ TRANSLATIONS = {
     }
 }
 
+GI_VERB = ("add", "give", "grant", "unlock", "obtain", "receive", "pick", "collect", "gain", "acquir", "award", "reward", "earn", "spawn", "cheat",
+           "equip", "increas", "insert", "put", "store", "craft", "purchase", "buy", "learn", "discover", "drop", "create", "refill", "restore", "fill")
+GI_NOUN = ("item", "weapon", "ammo", "gold", "coin", "money", "cash", "gem", "resource", "loot", "inventor", "equip", "card", "relic", "potion", "currenc",
+           "token", "xp", "exp", "skill", "upgrade", "key", "armor", "armour", "gear", "material", "ingredient", "food", "consum", "artifact", "blueprint",
+           "recipe", "crystal", "soul", "orb", "shard", "gil", "credit", "point", "bolt", "scrap", "part", "schematic", "booster", "stash", "wallet", "bag", "backpack", "tool")
+GI_BAD_FIRST = ("get", "set", "is", "has", "can", "on", "should", "check", "find", "remove", "clear", "reset", "update", "refresh", "show", "hide", "display",
+                "load", "save", "init", "setup", "serialize", "try")
+GI_UI = re.compile(r"(?i)(^|\.)(ui|hud|view|panel|popup|menu|slot|cell|widget|button|screen|tooltip|listener|drawer|editor)|(ui|view|panel|popup|slot|cell|widget|listener|drawer|editor)$")
+GI_DEV = re.compile(r"(?i)cheat|debug|console|devtool|developer|godmode|trainer|sandbox")
+
+
+def gi_tokens(name):
+    return [t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name.replace("_", " "))]
+
+
+def gi_rank(cls, name, params, legacy=0):
+    """How much a method looks like 'give the player something' (0 = not at all). params = [[type, name, default, kind, enum], ...]"""
+    if name.startswith(("get_", "set_", "add_", "remove_", ".")) or "<" in name or "$" in name:
+        return 0
+    toks, ctoks = gi_tokens(name), gi_tokens(cls.split(".")[-1])
+    if not toks:
+        return 0
+    body = toks[1:] if toks[0] in ("try", "do", "force", "on") else toks
+    verb = any(t.startswith(GI_VERB) for t in toks[:3])
+    noun = any(t.startswith(GI_NOUN) for t in toks[1:] + ctoks) or any(t.startswith(GI_NOUN) for t in toks)
+    if not verb and toks[0] in GI_BAD_FIRST and toks[0] != "try":
+        return int(legacy) if legacy >= 12 else 0
+    s = (20 if verb else 0) + (15 if noun else 0)
+    if not (verb or noun):
+        return int(legacy) if legacy >= 12 else 0
+    if any(p[3] == "enum" for p in params):
+        s += 8
+    if any(p[3] in ("int", "float") for p in params):
+        s += 3
+    if any(p[3] == "string" for p in params):
+        s += 3
+    if GI_DEV.search(cls):
+        s += 20
+    if GI_UI.search(cls):
+        s -= 25
+    if len(params) > 6:
+        s -= 6
+    return max(s + int(legacy) // 3, 0)
+
+GI_TR = {
+    "English": {
+        "tab_give": "Give items (any game)", "g_funcs": " 1. Function: pick what the game calls to give something ",
+        "g_search": "Search:", "g_all": "all methods (not only give-like)", "g_reindex": "🔄 Re-index", "g_shown": "showing {n} of {t}",
+        "g_c_rank": "★", "g_c_fn": "Function", "g_c_par": "Parameters", "g_c_kind": "Kind", "g_static": "static", "g_inst": "instance",
+        "g_recv": "Receiver (object path; empty = static):", "g_find": "🔎 Find in dump", "g_args": "Arguments  ( * = the item,  $* = the item as an editable value: one rule,  $ = amount ):",
+        "g_items": " 2. Item: what to give ", "g_enum": "Item list (enum):", "g_manual": "Item / id (manual):", "g_amount": "Amount:",
+        "g_give": "▶ Give now (console)", "g_rule": "📋 Add as cheat rule(s)", "g_copy": "Copy spec",
+        "g_nofn": "Pick a function first.", "g_noitem": "Pick at least one item (or type one in 'Item / id').", "g_norecv": "That function needs an object: fill in the receiver (or press 'Find in dump').",
+        "g_nostr": "The cheat table cannot pass text ids (call: takes numbers, enums, true/false, null, paths): use 'Give now' for this one.",
+        "g_noip": "Fill in the console IP first.", "g_idx_ok": "{m} methods and {e} enums of the game indexed.", "g_idx_run": "Indexing the SDK ...",
+        "g_idx_miss": "No index yet: press Re-index.", "g_legacy": "The 'legacy' folder (live give engine) is missing in the tools folder.",
+        "g_hint_obj": "This function takes game objects: press 'Find in dump' to list them.", "g_hint_enum": "{n} members of {e}",
+        "g_live_warn": "The game's own function is called from a short-lived patch on the game thread. Use it in a normal state (not loading).",
+        "g_given": "Done: the game accepted {n} call(s).", "g_failed": "Not done - see the log below the main window for the reason.",
+        "g_prep": "Preparing the function (receiver + items) ...", "g_ready": "ready: receiver {r}", "g_notready": "not callable yet: {w}",
+        "g_nolist": "no list: type the id in 'Item / id' or press 'Find in dump'",
+        "g_c_recv": "Receiver (by types)", "g_noitemfn": "This function takes no item: it is called as it is (amount only if it has one).", "g_sugg": "suggested receiver (from the field types, not checked in memory): {p}", "g_nopath": "no static path leads to this class (it is a scene object): the game must create it first.",
+    },
+    "Español": {
+        "tab_give": "Dar items (cualquier juego)", "g_funcs": " 1. Función: elige lo que el juego llama para dar algo ",
+        "g_search": "Buscar:", "g_all": "todos los métodos (no solo los de dar)", "g_reindex": "🔄 Reindexar", "g_shown": "mostrando {n} de {t}",
+        "g_c_rank": "★", "g_c_fn": "Función", "g_c_par": "Parámetros", "g_c_kind": "Tipo", "g_static": "estático", "g_inst": "instancia",
+        "g_recv": "Receptor (ruta del objeto; vacío = estático):", "g_find": "🔎 Buscar en el dump", "g_args": "Argumentos  ( * = el item,  $* = el item como valor editable: una regla,  $ = cantidad ):",
+        "g_items": " 2. Item: qué dar ", "g_enum": "Lista de items (enum):", "g_manual": "Item / id (manual):", "g_amount": "Cantidad:",
+        "g_give": "▶ Dar ahora (consola)", "g_rule": "📋 Añadir como regla(s) de cheat", "g_copy": "Copiar spec",
+        "g_nofn": "Elige primero una función.", "g_noitem": "Elige al menos un item (o escribe uno en 'Item / id').", "g_norecv": "Esa función necesita un objeto: rellena el receptor (o pulsa 'Buscar en el dump').",
+        "g_nostr": "El trainer no puede pasar ids de texto (call: admite números, enums, true/false, null, rutas): usa 'Dar ahora' para éste.",
+        "g_noip": "Rellena primero la IP de la consola.", "g_idx_ok": "{m} métodos y {e} enums del juego indexados.", "g_idx_run": "Indexando el SDK ...",
+        "g_idx_miss": "Aún no hay índice: pulsa Reindexar.", "g_legacy": "Falta la carpeta 'legacy' (motor del give en vivo) en la carpeta de tools.",
+        "g_hint_obj": "Esta función recibe objetos del juego: pulsa 'Buscar en el dump' para listarlos.", "g_hint_enum": "{n} miembros de {e}",
+        "g_live_warn": "La función del propio juego se llama desde un parche breve en el hilo del juego. Úsalo en estado normal (no cargando).",
+        "g_given": "Hecho: el juego aceptó {n} llamada(s).", "g_failed": "No se pudo - mira el log bajo la ventana principal para ver el motivo.",
+        "g_prep": "Preparando la función (receptor + items) ...", "g_ready": "lista: receptor {r}", "g_notready": "aún no se puede llamar: {w}",
+        "g_nolist": "sin lista: escribe el id en 'Item / id' o pulsa 'Buscar en el dump'",
+        "g_c_recv": "Receptor (por tipos)", "g_noitemfn": "Esta función no recibe item: se llama tal cual (con cantidad solo si la tiene).", "g_sugg": "receptor sugerido (por los tipos de los campos, sin comprobar en memoria): {p}", "g_nopath": "ninguna ruta estática llega a esta clase (es un objeto de escena): el juego tiene que crearlo antes.",
+    },
+    "Deutsch": {
+        "tab_give": "Items geben (jedes Spiel)", "g_funcs": " 1. Funktion: was das Spiel zum Geben aufruft ",
+        "g_search": "Suchen:", "g_all": "alle Methoden (nicht nur Geben)", "g_reindex": "🔄 Neu indizieren", "g_shown": "zeige {n} von {t}",
+        "g_c_rank": "★", "g_c_fn": "Funktion", "g_c_par": "Parameter", "g_c_kind": "Art", "g_static": "statisch", "g_inst": "Instanz",
+        "g_recv": "Empfänger (Objektpfad; leer = statisch):", "g_find": "🔎 Im Dump suchen", "g_args": "Argumente  ( * = das Item,  $* = das Item als editierbarer Wert: eine Regel,  $ = Menge ):",
+        "g_items": " 2. Item: was gegeben wird ", "g_enum": "Item-Liste (Enum):", "g_manual": "Item / ID (manuell):", "g_amount": "Menge:",
+        "g_give": "▶ Jetzt geben (Konsole)", "g_rule": "📋 Als Cheat-Regel(n)", "g_copy": "Spec kopieren",
+        "g_nofn": "Zuerst eine Funktion wählen.", "g_noitem": "Mindestens ein Item wählen (oder bei 'Item / ID' eintippen).", "g_norecv": "Die Funktion braucht ein Objekt: Empfänger eintragen (oder 'Im Dump suchen').",
+        "g_nostr": "Der Trainer kann keine Text-IDs übergeben: 'Jetzt geben' benutzen.",
+        "g_noip": "Zuerst die Konsolen-IP eintragen.", "g_idx_ok": "{m} Methoden und {e} Enums des Spiels indiziert.", "g_idx_run": "Indiziere das SDK ...",
+        "g_idx_miss": "Noch kein Index: Neu indizieren drücken.", "g_legacy": "Der Ordner 'legacy' (Live-Give-Engine) fehlt im Tools-Ordner.",
+        "g_hint_obj": "Diese Funktion nimmt Spielobjekte: 'Im Dump suchen' listet sie auf.", "g_hint_enum": "{n} Member von {e}",
+        "g_live_warn": "Die Spielfunktion wird über einen kurzen Patch im Spiel-Thread aufgerufen. Nur im Normalzustand benutzen (nicht beim Laden).",
+        "g_given": "Fertig: das Spiel hat {n} Aufruf(e) akzeptiert.", "g_failed": "Nicht geklappt - Grund im Log unter dem Hauptfenster.",
+        "g_prep": "Bereite die Funktion vor (Empfänger + Items) ...", "g_ready": "bereit: Empfänger {r}", "g_notready": "noch nicht aufrufbar: {w}",
+        "g_nolist": "keine Liste: ID bei 'Item / ID' eintippen oder 'Im Dump suchen'",
+        "g_c_recv": "Empfänger (nach Typen)", "g_noitemfn": "Diese Funktion nimmt kein Item: sie wird unverändert aufgerufen.", "g_sugg": "vorgeschlagener Empfänger (nach Feldtypen, nicht im Speicher geprüft): {p}", "g_nopath": "kein statischer Pfad führt zu dieser Klasse (Szenenobjekt): das Spiel muss es erst erzeugen.",
+    },
+}
+
+
+ITEMS_TR = {
+    "English": {
+        "btn_items": "🎒 Items / Methods", "win_title": "Items & methods (il2items.py / il2live.py --methods)",
+        "tab_items": "Give-item methods", "tab_methods": "Methods (damage, money ...)",
+        "btn_search": "🔎 Search", "lbl_amount": "Amount:", "chk_all": "all enum members", "lbl_enum": "Enum:", "lbl_method": "Method:",
+        "lbl_word": "Name contains (empty = usual targets):", "btn_add": "📋 Add to cheat rules", "lbl_filter": "Filter:",
+        "col_name": "Name", "col_spec": "Rule (il2cheat spec)", "col_group": "Give method", "col_live": "Live", "col_who": "Who",
+        "col_sig": "Method", "col_hint": "Spec hint", "status_idle": "Ready", "status_busy": "Working... (a dump can take a minute)",
+        "warn_dump": "Load a game session folder with its SDK (sdk\\dump.cs) first.", "warn_select": "Select at least one row first.",
+        "msg_added": "{n} rule(s) added to the cheat list (section 2).", "msg_nohint": "That method has no ready spec (not static / not void / unsupported return): write it by hand, see the README.",
+        "msg_enums": "item enums: {e}", "msg_none": "Nothing found.", "msg_error": "Error",
+        "msg_note": "call: / patch: rules are not tested with the check mark: they run from the trainer (try them on the console with a save you can lose).",
+        "msg_template": "template - edit the <path to ...> parts",
+        "tab_enum": "Call per enum member", "lbl_call": "Method to call (path.Method):", "lbl_etype": "Enum:", "lbl_args": "Arguments (* = the member):", "btn_members": "📃 List members",
+        "msg_enum_hint": "For methods il2items does not propose (TryUnlockingWeapon, Unlock...): the object path + method, the enum of the item/weapon and the arguments; * is replaced by Enum.Member. Example: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
+        "warn_enum": "Fill in the method, the enum and press List members first.", "msg_enum_none": "Enum {e} not found in sdk\\dump.cs.",
+    },
+    "Español": {
+        "btn_items": "🎒 Items / Métodos", "win_title": "Items y métodos (il2items.py / il2live.py --methods)",
+        "tab_items": "Métodos de dar items", "tab_methods": "Métodos (daño, dinero ...)",
+        "btn_search": "🔎 Buscar", "lbl_amount": "Cantidad:", "chk_all": "todos los miembros del enum", "lbl_enum": "Enum:", "lbl_method": "Método:",
+        "lbl_word": "Nombre contiene (vacío = objetivos habituales):", "btn_add": "📋 Añadir a reglas de cheat", "lbl_filter": "Filtro:",
+        "col_name": "Nombre", "col_spec": "Regla (spec de il2cheat)", "col_group": "Método de dar", "col_live": "En vivo", "col_who": "Quién",
+        "col_sig": "Método", "col_hint": "Spec sugerida", "status_idle": "Listo", "status_busy": "Trabajando... (un dump puede tardar un minuto)",
+        "warn_dump": "Carga primero una carpeta de sesión con su SDK (sdk\\dump.cs).", "warn_select": "Selecciona al menos una fila.",
+        "msg_added": "{n} regla(s) añadida(s) a la lista de cheats (sección 2).", "msg_nohint": "Ese método no tiene spec lista (no es estático / no es void / retorno no soportado): escríbela a mano, mira el README.",
+        "msg_enums": "enums de items: {e}", "msg_none": "No se encontró nada.", "msg_error": "Error",
+        "msg_note": "Las reglas call: / patch: no se prueban con el check: se ejecutan desde el trainer (pruébalas en la consola con una partida que puedas perder).",
+        "msg_template": "plantilla - edita las partes <path to ...>",
+        "tab_enum": "Llamar por miembro de enum", "lbl_call": "Método a llamar (ruta.Método):", "lbl_etype": "Enum:", "lbl_args": "Argumentos (* = el miembro):", "btn_members": "📃 Listar miembros",
+        "msg_enum_hint": "Para métodos que il2items no propone (TryUnlockingWeapon, Unlock...): la ruta al objeto + método, el enum del item/arma y los argumentos; * se sustituye por Enum.Miembro. Ejemplo: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
+        "warn_enum": "Rellena el método, el enum y pulsa Listar miembros primero.", "msg_enum_none": "No se encontró el enum {e} en sdk\\dump.cs.",
+    },
+    "Deutsch": {
+        "btn_items": "🎒 Items / Methoden", "win_title": "Items & Methoden (il2items.py / il2live.py --methods)",
+        "tab_items": "Item-Geben-Methoden", "tab_methods": "Methoden (Schaden, Geld ...)",
+        "btn_search": "🔎 Suchen", "lbl_amount": "Menge:", "chk_all": "alle Enum-Member", "lbl_enum": "Enum:", "lbl_method": "Methode:",
+        "lbl_word": "Name enthält (leer = übliche Ziele):", "btn_add": "📋 Zu Cheat-Regeln", "lbl_filter": "Filter:",
+        "col_name": "Name", "col_spec": "Regel (il2cheat-Spec)", "col_group": "Geben-Methode", "col_live": "Live", "col_who": "Wer",
+        "col_sig": "Methode", "col_hint": "Spec-Vorschlag", "status_idle": "Bereit", "status_busy": "Arbeite... (ein Dump kann eine Minute dauern)",
+        "warn_dump": "Zuerst einen Session-Ordner mit SDK (sdk\\dump.cs) laden.", "warn_select": "Mindestens eine Zeile wählen.",
+        "msg_added": "{n} Regel(n) zur Cheat-Liste hinzugefügt (Abschnitt 2).", "msg_nohint": "Für diese Methode gibt es keine fertige Spec: von Hand schreiben, siehe README.",
+        "msg_enums": "Item-Enums: {e}", "msg_none": "Nichts gefunden.", "msg_error": "Fehler",
+        "msg_note": "call: / patch:-Regeln werden nicht mit dem Haken getestet: sie laufen im Trainer (auf der Konsole mit einem verlierbaren Spielstand testen).",
+        "msg_template": "Vorlage - die <path to ...>-Teile ersetzen",
+        "tab_enum": "Aufruf pro Enum-Member", "lbl_call": "Methode (Pfad.Methode):", "lbl_etype": "Enum:", "lbl_args": "Argumente (* = das Member):", "btn_members": "📃 Member auflisten",
+        "msg_enum_hint": "Für Methoden, die il2items nicht vorschlägt (TryUnlockingWeapon, Unlock...): Objektpfad + Methode, das Enum des Items/der Waffe und die Argumente; * wird durch Enum.Member ersetzt. Beispiel: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
+        "warn_enum": "Methode und Enum ausfüllen und zuerst Member auflisten.", "msg_enum_none": "Enum {e} nicht in sdk\\dump.cs gefunden.",
+    },
+}
+
+SPEC_RE = re.compile(r'^"(?P<spec>[^"]+=(?:call|patch):.+)"$')
+TEMPLATE_RE = re.compile(r'^#\s+(?P<sig>.+?): (?P<why>.+?)\s+->\s+"(?P<spec>.+)"$')
+
+
+def rule_from_spec(spec, prefix=""):
+    """'Name=call:Path.Method(args)' / 'Name=patch:Class.Method=mode' -> (name, path, value) of a rule row."""
+    name, _, rest = spec.partition("=")
+    if rest.startswith("patch:"):
+        target, _, mode = rest.rpartition("=")
+        return prefix + name, target, mode
+    return prefix + name, rest, ""
+
+
+def parse_il2items(text):
+    """Output of il2items.py -> (enums line, [(group, name, spec, note)]). group = the give method header; note = 'template...' for
+    methods that take item objects (their spec needs editing)."""
+    enums, rows, group = "", [], ""
+    for line in text.splitlines():
+        line = line.rstrip()
+        if line.startswith("item enums:"):
+            enums = line[len("item enums:"):].strip()
+        elif line.startswith("# ") and " RVA " in line and "[" in line:
+            group = line[2:]
+        elif SPEC_RE.match(line):
+            spec = SPEC_RE.match(line)["spec"]
+            rows.append((group, spec.partition("=")[0], spec, ""))
+        elif TEMPLATE_RE.match(line):
+            m = TEMPLATE_RE.match(line)
+            mn = re.search(r"(\w+)\(", m["sig"])
+            spec = (mn.group(1) if mn else "Item") + "=" + m["spec"].partition("=")[2]      # the template says "Name": use the method's name
+            rows.append((m["sig"], spec.partition("=")[0], spec, m["why"]))
+    return enums, rows
+
+
+def parse_methods(text):
+    """Output of il2live.py --methods -> [(live objects, who, signature+RVA, hint)]: 'n<TAB>tag<TAB>sig<TAB>RVA ...<TAB>hint'."""
+    out = []
+    for line in text.splitlines():
+        f = line.rstrip("\n").split("\t")
+        if len(f) >= 5 and f[0].strip().isdigit():
+            out.append((f[0].strip(), f[1].strip(), f[2].strip() + "  " + f[3].strip(), f[4].strip()))
+    return out
+
+
 class IL2CppDumperGUI:
     def __init__(self, root):
         self.root = root
@@ -282,6 +479,10 @@ class IL2CppDumperGUI:
         self.is_running = False
         self.start_time = 0
         self.cheat_rows = []
+        self.items_win = None
+        self.items_busy = False
+        self.items_rows = []
+        self.methods_rows = []
         self.search_matches = []
         self.current_match_idx = -1
         self.find_win = None
@@ -1029,7 +1230,10 @@ class IL2CppDumperGUI:
         self.btn_export_rules.pack(side="left", padx=(0, 6))
 
         self.btn_import_rules = ttk.Button(btn_actions_frame, command=self.import_game_rules)
-        self.btn_import_rules.pack(side="left")
+        self.btn_import_rules.pack(side="left", padx=(0, 6))
+
+        self.btn_items = ttk.Button(btn_actions_frame, command=self.open_items_window)
+        self.btn_items.pack(side="left")
 
         action_buttons_row = ttk.Frame(self.frame_cheat)
         action_buttons_row.grid(row=2, column=1, pady=4, sticky="w")
@@ -1201,6 +1405,701 @@ class IL2CppDumperGUI:
 
         self.cheat_rows.append({'frame': row_frame, 'name': entry_name, 'path': entry_path, 'value': entry_value})
 
+
+    # ---- Items / Methods window: il2items.py (give-item methods) and il2live.py --methods (damage, money ...) -------------------
+    def itr(self, key):
+        return (ITEMS_TR.get(self.current_lang, ITEMS_TR["English"]).get(key) or GI_TR.get(self.current_lang, GI_TR["English"]).get(key)
+                or GI_TR["English"].get(key) or ITEMS_TR["English"][key])
+
+    def items_dump_dir(self):
+        dump_path = self.entry_dump_path.get().strip()
+        d = os.path.abspath(os.path.join(TOOLS_DIR, dump_path)) if dump_path else ""
+        if not d or not os.path.exists(os.path.join(d, "sdk", "dump.cs")):
+            messagebox.showwarning("Warning", self.itr("warn_dump"), parent=self.items_win or self.root)
+            return None
+        return d
+
+    def items_run(self, script, args, on_done):
+        """Run a tool in a thread; on_done(rc, stdout, stderr) runs on the Tk thread."""
+        if self.items_busy:
+            return
+        self.items_busy = True
+        self.items_status.set(self.itr("status_busy"))
+        spath = os.path.join(TOOLS_DIR, script)
+        cmd = [sys.executable, "-u", spath] + args
+        self.log(f"\n> Running: {subprocess.list2cmdline(cmd)}")
+        sdir = os.path.dirname(spath)
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONPATH=os.pathsep.join(x for x in (sdir, TOOLS_DIR, os.environ.get("PYTHONPATH", "")) if x))
+
+        def task():
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=sdir, env=env)
+                rc, out, err = r.returncode, r.stdout, r.stderr
+            except Exception as ex:
+                rc, out, err = 1, "", str(ex)
+
+            def finish():
+                self.items_busy = False
+                self.items_status.set(self.itr("status_idle"))
+                on_done(rc, out, err)
+            self.root.after(0, finish)
+        threading.Thread(target=task, daemon=True).start()
+
+    def open_items_window(self):
+        if self.items_win and self.items_win.winfo_exists():
+            self.items_win.lift()
+            return
+        it = self.itr
+        win = self.items_win = tk.Toplevel(self.root)
+        win.title(it("win_title"))
+        win.geometry("1100x800")
+        win.minsize(860, 600)
+        self.items_status = tk.StringVar(value=it("status_idle"))
+        ttk.Label(win, textvariable=self.items_status, foreground="#4ec9b0", font=("Arial", 9, "italic")).pack(fill="x", padx=10, pady=(6, 0))
+        ttk.Label(win, text=it("msg_note"), foreground="#808080", wraplength=960, justify="left").pack(fill="x", padx=10, pady=(0, 4))
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=8, pady=6)
+
+        def tree(parent, cols):
+            fr = ttk.Frame(parent)
+            fr.pack(fill="both", expand=True, padx=6, pady=4)
+            tr = ttk.Treeview(fr, columns=[c[0] for c in cols], show="headings", selectmode="extended")
+            for cid, title, w in cols:
+                tr.heading(cid, text=title)
+                tr.column(cid, width=w, anchor="w")
+            sb = ttk.Scrollbar(fr, orient="vertical", command=tr.yview)
+            tr.configure(yscrollcommand=sb.set)
+            tr.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            return tr
+
+        self.gi_build(nb, tree)
+
+        # tab 2: ready proposals of TLH's il2items.py
+        t1 = ttk.Frame(nb)
+        nb.add(t1, text=it("tab_items"))
+        bar = ttk.Frame(t1)
+        bar.pack(fill="x", padx=6, pady=6)
+        ttk.Button(bar, text=it("btn_search"), command=self.items_search).pack(side="left", padx=(0, 8))
+        ttk.Label(bar, text=it("lbl_amount")).pack(side="left")
+        self.items_amount = ttk.Spinbox(bar, from_=1, to=999999, width=7)
+        self.items_amount.set("1")
+        self.items_amount.pack(side="left", padx=(2, 8))
+        self.items_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text=it("chk_all"), variable=self.items_all).pack(side="left", padx=(0, 8))
+        ttk.Label(bar, text=it("lbl_enum")).pack(side="left")
+        self.items_enum = ttk.Entry(bar, width=14)
+        self.items_enum.pack(side="left", padx=(2, 8))
+        ttk.Label(bar, text=it("lbl_method")).pack(side="left")
+        self.items_method = ttk.Entry(bar, width=14)
+        self.items_method.pack(side="left", padx=(2, 8))
+        self.items_enums_lbl = ttk.Label(t1, text="", foreground="#808080", wraplength=940, justify="left")
+        self.items_enums_lbl.pack(fill="x", padx=8)
+        fr = ttk.Frame(t1)
+        fr.pack(fill="x", padx=6)
+        ttk.Label(fr, text=it("lbl_filter")).pack(side="left")
+        self.items_filter = tk.StringVar()
+        ttk.Entry(fr, textvariable=self.items_filter, width=24).pack(side="left", padx=4)
+        self.items_filter.trace_add("write", lambda *a: self.items_fill())
+        self.items_tree = tree(t1, [("name", it("col_name"), 190), ("spec", it("col_spec"), 470), ("group", it("col_group"), 300)])
+        self.items_tree.bind("<Double-1>", lambda e: self.items_add_selected())
+        ttk.Button(t1, text=it("btn_add"), command=self.items_add_selected).pack(anchor="w", padx=8, pady=(2, 8))
+        self.items_rows = []
+
+        # tab 2: methods by name (il2live.py --methods)
+        t2 = ttk.Frame(nb)
+        nb.add(t2, text=it("tab_methods"))
+        bar2 = ttk.Frame(t2)
+        bar2.pack(fill="x", padx=6, pady=6)
+        ttk.Label(bar2, text=it("lbl_word")).pack(side="left")
+        self.methods_word = ttk.Entry(bar2, width=22)
+        self.methods_word.pack(side="left", padx=6)
+        self.methods_word.bind("<Return>", lambda e: self.methods_search())
+        ttk.Button(bar2, text=it("btn_search"), command=self.methods_search).pack(side="left")
+        self.methods_tree = tree(t2, [("live", it("col_live"), 50), ("who", it("col_who"), 60), ("sig", it("col_sig"), 560), ("hint", it("col_hint"), 280)])
+        self.methods_tree.bind("<Double-1>", lambda e: self.methods_add_selected())
+        ttk.Button(t2, text=it("btn_add"), command=self.methods_add_selected).pack(anchor="w", padx=8, pady=(2, 8))
+
+
+    # ---- generic "give items" tab: any method of the game + any item list ------------------------------------------------
+    GI_LEGACY = os.path.join("legacy", "il2items.py")
+
+    def gi_build(self, nb, tree):
+        it = self.itr
+        self.gi_rows, self.gi_enums, self.gi_fn, self.gi_cat, self.gi_args = [], {}, None, [], []
+        self.gi_vars = dict(search=tk.StringVar(), all=tk.BooleanVar(value=False), recv=tk.StringVar(), amount=tk.StringVar(value="1"),
+                            manual=tk.StringVar(), efilter=tk.StringVar(), enum=tk.StringVar(), info=tk.StringVar(), shown=tk.StringVar(), hint=tk.StringVar())
+        v = self.gi_vars
+        t = ttk.Frame(nb)
+        nb.add(t, text=it("tab_give"))
+        # --- 1. functions
+        f1 = ttk.LabelFrame(t, text=it("g_funcs"))
+        f1.pack(fill="both", expand=True, padx=6, pady=(6, 3))
+        bar = ttk.Frame(f1)
+        bar.pack(fill="x", padx=6, pady=4)
+        ttk.Label(bar, text=it("g_search")).pack(side="left")
+        e = ttk.Entry(bar, textvariable=v["search"], width=28)
+        e.pack(side="left", padx=4)
+        v["search"].trace_add("write", lambda *a: self.gi_fill_funcs())
+        ttk.Checkbutton(bar, text=it("g_all"), variable=v["all"], command=self.gi_fill_funcs).pack(side="left", padx=8)
+        ttk.Button(bar, text=it("g_reindex"), command=lambda: self.gi_index(True)).pack(side="left", padx=4)
+        ttk.Label(bar, textvariable=v["shown"], foreground="#808080").pack(side="left", padx=8)
+        self.gi_ftree = tree(f1, [("rank", it("g_c_rank"), 40), ("ok", "", 24), ("fn", it("g_c_fn"), 330), ("par", it("g_c_par"), 290), ("recv", it("g_c_recv"), 330), ("kind", it("g_c_kind"), 70)])
+        self.gi_ftree.configure(height=8)
+        self.gi_ftree.bind("<<TreeviewSelect>>", lambda e: self.gi_pick())
+        # --- selected function: receiver + arguments
+        sel = ttk.Frame(f1)
+        sel.pack(fill="x", padx=6, pady=(0, 2))
+        ttk.Label(sel, textvariable=v["info"], foreground="#4ec9b0", wraplength=1020, justify="left").pack(fill="x")
+        rr = ttk.Frame(sel)
+        rr.pack(fill="x", pady=2)
+        ttk.Label(rr, text=it("g_recv")).pack(side="left")
+        ttk.Entry(rr, textvariable=v["recv"], width=52).pack(side="left", padx=4)
+        ttk.Button(rr, text=it("g_find"), command=self.gi_find).pack(side="left")
+        self.gi_args_fr = ttk.Frame(sel)
+        self.gi_args_fr.pack(fill="x", pady=2)
+        # --- 2. items
+        f2 = ttk.LabelFrame(t, text=it("g_items"))
+        f2.pack(fill="both", expand=True, padx=6, pady=3)
+        bar2 = ttk.Frame(f2)
+        bar2.pack(fill="x", padx=6, pady=4)
+        ttk.Label(bar2, text=it("g_enum")).pack(side="left")
+        self.gi_combo = ttk.Combobox(bar2, textvariable=v["enum"], width=46, state="readonly")
+        self.gi_combo.pack(side="left", padx=4)
+        self.gi_combo.bind("<<ComboboxSelected>>", lambda e: self.gi_enum_changed())
+        ttk.Label(bar2, text=it("lbl_filter")).pack(side="left", padx=(10, 0))
+        ttk.Entry(bar2, textvariable=v["efilter"], width=18).pack(side="left", padx=4)
+        v["efilter"].trace_add("write", lambda *a: self.gi_fill_items())
+        ttk.Label(bar2, textvariable=v["hint"], foreground="#808080").pack(side="left", padx=8)
+        self.gi_itree = tree(f2, [("name", it("col_name"), 330), ("value", "=", 560)])
+        self.gi_itree.configure(height=7)
+        self.gi_itree.bind("<Double-1>", lambda e: self.gi_add_rules())
+        # --- actions
+        act = ttk.Frame(t)
+        act.pack(fill="x", padx=6, pady=(3, 8))
+        ttk.Label(act, text=it("g_manual")).pack(side="left")
+        ttk.Entry(act, textvariable=v["manual"], width=18).pack(side="left", padx=4)
+        ttk.Label(act, text=it("g_amount")).pack(side="left", padx=(8, 0))
+        ttk.Spinbox(act, from_=0, to=999999999, textvariable=v["amount"], width=10).pack(side="left", padx=4)
+        ttk.Button(act, text=it("g_give"), command=self.gi_give_now).pack(side="left", padx=(12, 4))
+        ttk.Button(act, text=it("g_rule"), command=self.gi_add_rules).pack(side="left", padx=4)
+        ttk.Button(act, text=it("g_copy"), command=self.gi_copy).pack(side="left", padx=4)
+        self.root.after(200, lambda: self.gi_index(False))
+
+    # -- index ---------------------------------------------------------------------------------------------------------------
+    def gi_dump_quiet(self):
+        dump_path = self.entry_dump_path.get().strip()
+        d = os.path.abspath(os.path.join(TOOLS_DIR, dump_path)) if dump_path else ""
+        return d if d and os.path.exists(os.path.join(d, "sdk", "dump.cs")) else None
+
+    def gi_index(self, force):
+        d = self.gi_dump_quiet()
+        if not d:
+            self.gi_vars["info"].set(self.itr("warn_dump"))
+            return
+        if not os.path.exists(os.path.join(TOOLS_DIR, self.GI_LEGACY)):
+            self.gi_vars["info"].set(self.itr("g_legacy"))
+            return
+        ip = os.path.join(d, "items_index.json")
+        try:
+            ok = (not force and os.path.exists(ip) and os.path.getmtime(ip) >= os.path.getmtime(os.path.join(d, "sdk", "dump.cs")))
+        except OSError:
+            ok = False
+        if ok and self.gi_load(d):
+            return
+        self.gi_vars["info"].set(self.itr("g_idx_run"))
+        self.items_run(self.GI_LEGACY, [d, "index"], lambda rc, out, err: (self.gi_load(d) if rc == 0 else self.gi_vars["info"].set((err.strip().splitlines() or ["index failed"])[-1][:300])))
+
+    def gi_load(self, d):
+        try:
+            data = json.load(open(os.path.join(d, "items_index.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            self.gi_vars["info"].set(self.itr("g_idx_miss"))
+            return False
+        if data.get("ver", 0) < 3:
+            return False
+        self.gi_sugg = self.gi_paths(data.get("graph", {}))
+        rows = []
+        for cls, name, n, st, rva, ret, ps, sc, virt in data["methods"]:
+            fn = f"{cls}.{name}" + (f"/{n}" if n > 1 else "")
+            par = ", ".join(f"{p[0]} {p[1]}" + (f" = {p[2]}" if p[2] is not None else "") for p in ps)
+            rows.append(dict(fn=fn, cls=cls, name=name, static=bool(st), rva=rva, ret=ret, params=ps, rank=gi_rank(cls, name, ps, sc), par=par,
+                             blob=(fn + " " + par).lower()))
+        rows.sort(key=lambda r: (-r["rank"], r["fn"]))
+        self.gi_rows = rows
+        self.gi_enums = {e[0]: dict(full=e[0], name=e[1], members=e[2]) for e in data["enums"]}
+        item_like = re.compile(r"(?i)item|weapon|ammo|inventor|loot|resource|equip|gear|armo|card|relic|potion|currenc|collect|material|ingredient|skill|upgrade")
+        order = sorted(self.gi_enums.values(), key=lambda e: (not item_like.search(e["name"]), -len(e["members"])))
+        self.gi_combo["values"] = [f"{e['name']} ({len(e['members'])})   {e['full']}" for e in order]
+        self.gi_combo_keys = [e["full"] for e in order]
+        self.gi_vars["info"].set(self.itr("g_idx_ok").format(m=len(rows), e=len(order)))
+        self.gi_fill_funcs()
+        return True
+
+    @staticmethod
+    def gi_paths(graph):
+        """{class full name: il2live path of the shortest static chain that ends in an object of it}, from the field types only."""
+        by_name = {}
+        for full, (name, base, fl) in graph.items():
+            by_name.setdefault(name, []).append(full)
+
+        def chain(full):
+            out, seen = [], 0
+            while full and seen < 16:
+                out.append(full)
+                b = graph[full][1]
+                full = (by_name.get(b) or [None])[0] if b else None
+                seen += 1
+            return out
+
+        def fields(full):
+            return [f for c in chain(full) for f in graph[c][2]]
+        good = re.compile(r"(?i)^(_?instance|<instance>k__backingfield|current|main|singleton|_?inst)$")
+        roots = [(full, f) for full, (name, base, fl) in graph.items() for f in fl if f[2] and f[1] in by_name]
+        roots.sort(key=lambda r: (0 if re.match(r"(?i)^_?instance$", r[1][0]) else (1 if good.match(r[1][0]) else 2), r[0]))
+        best, frontier = {}, []
+        for full, f in roots:
+            tgt = by_name[f[1]][0]
+            if tgt not in best:
+                best[tgt] = f"{graph[full][0]}::{f[0]}"
+                frontier.append(tgt)
+        for _ in range(3):
+            nxt = []
+            for full in frontier:
+                for n, t, st in fields(full):
+                    if st or t not in by_name:
+                        continue
+                    tgt = by_name[t][0]
+                    if tgt not in best:
+                        best[tgt] = best[full] + "." + n
+                        nxt.append(tgt)
+            frontier = nxt
+        out = {}
+        for full, path in best.items():                       # an object of a subclass is an object of the class too
+            for a in chain(full):
+                if a not in out or len(path) < len(out[a]):
+                    out[a] = path
+        return out
+
+    def gi_all_cands(self):
+        d = self.gi_dump_quiet()
+        try:
+            scan = json.load(open(os.path.join(d, "items.json"), encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        return {(c.get("cls"), c.get("method"), c.get("rva")): c for c in scan.get("candidates", [])}
+
+    def gi_fill_funcs(self):
+        tr = self.gi_ftree
+        tr.delete(*tr.get_children())
+        words = self.gi_vars["search"].get().lower().split()
+        allm = self.gi_vars["all"].get()
+        shown = total = 0
+        cands = self.gi_all_cands()
+        order = []
+        for i, r in enumerate(self.gi_rows):
+            if words and not all(w in r["blob"] for w in words):
+                continue
+            if not allm and not words and r["rank"] < 30:
+                continue
+            c = cands.get((r["cls"], r["name"], r["rva"]))
+            mark = "" if c is None else ("✔" if c.get("callable") else "✖")
+            order.append((mark == "✖", -r["rank"], i, mark))
+        order.sort()
+        total = len(order)
+        for _, _, i, mark in order[:600]:
+            r = self.gi_rows[i]
+            recv = self.itr("g_static") if r["static"] else getattr(self, "gi_sugg", {}).get(r["cls"], "—")
+            tr.insert("", "end", iid=str(i), values=(r["rank"], mark, r["fn"], r["par"], recv, self.itr("g_static") if r["static"] else self.itr("g_inst")))
+            shown += 1
+        self.gi_vars["shown"].set(self.itr("g_shown").format(n=shown, t=total))
+
+    # -- selecting a function --------------------------------------------------------------------------------------------------
+    @staticmethod
+    def gi_param_defaults(r):
+        """Default text of every argument entry: * = the item, $ = the amount."""
+        ps, out, used_item, used_cnt = r["params"], [], False, False
+        item_i = next((i for i, p in enumerate(ps) if p[3] == "enum"), None)
+        if item_i is None:
+            item_i = next((i for i, p in enumerate(ps) if p[3] == "string"), None)
+        if item_i is None:
+            item_i = next((i for i, p in enumerate(ps) if p[3] == "obj" and p[2] is None and re.search(r"(?i)item|weapon|resource|loot|equip|card|relic|potion|material", p[0])), None)
+        if item_i is None:
+            item_i = next((i for i, p in enumerate(ps) if p[3] == "int" and re.search(r"(?i)id$|^id|item|type|index", p[1])), None)
+        cnt_i = next((i for i, p in enumerate(ps) if p[3] in ("int", "float") and i != item_i and re.search(r"(?i)amount|count|quantity|qty|num|value|total|cash|gold|coin|money|xp|exp|point|gem|soul|credit", p[1])), None)
+        if cnt_i is None and item_i is None:
+            cnt_i = next((i for i, p in enumerate(ps) if p[3] in ("int", "float") and p[2] is None), None)
+        for i, p in enumerate(ps):
+            if i == item_i:
+                out.append("*")
+            elif i == cnt_i:
+                out.append("$")
+            elif p[2] is not None:
+                out.append({"True": "true", "False": "false"}.get(p[2], p[2]))
+            elif p[3] == "bool":
+                out.append("false")
+            elif p[3] in ("int", "float"):
+                out.append("0")
+            elif p[3] == "enum":
+                out.append("0")
+            else:
+                out.append("null")
+        return out, item_i
+
+    def gi_pick(self):
+        sel = self.gi_ftree.selection()
+        if not sel:
+            return
+        r = self.gi_fn = self.gi_rows[int(sel[0])]
+        self.gi_vars["info"].set(f"{'static ' if r['static'] else ''}{r['ret']} {r['fn']}({r['par']})   RVA {r['rva']:#x}")
+        defaults, item_i = self.gi_param_defaults(r)
+        for w in self.gi_args_fr.winfo_children():
+            w.destroy()
+        self.gi_args = []
+        for i, (p, dv) in enumerate(zip(r["params"], defaults)):
+            ttk.Label(self.gi_args_fr, text=f"{p[0]} {p[1]}").grid(row=0, column=i * 2, sticky="w", padx=(0, 3))
+            sv = tk.StringVar(value=dv)
+            ttk.Entry(self.gi_args_fr, textvariable=sv, width=14).grid(row=0, column=i * 2 + 1, sticky="w", padx=(0, 10))
+            self.gi_args.append(sv)
+        # the receiver and the catalog of a function prepared before
+        cand = self.gi_cand(r)
+        sugg = "" if r["static"] else getattr(self, "gi_sugg", {}).get(r["cls"], "")
+        self.gi_vars["recv"].set("" if r["static"] else (((cand or {}).get("receiver") or {}).get("path") or sugg))
+        if not r["static"]:
+            note = (self.itr("g_notready").format(w=cand.get("why") or "?") if cand and not cand.get("callable") else
+                    self.itr("g_sugg").format(p=sugg) if sugg and not (cand and cand.get("receiver")) else self.itr("g_nopath") if not sugg and not cand else "")
+            if note:
+                self.gi_vars["info"].set(self.gi_vars["info"].get() + "\n" + note)
+        self.gi_cat = []
+        if item_i is not None:
+            p = r["params"][item_i]
+            if p[3] == "enum" and p[4] in self.gi_enums:
+                self.gi_set_enum(p[4])
+            else:
+                self.gi_cat = self.gi_catalog_of(cand)
+                self.gi_combo.set("")
+                self.gi_vars["hint"].set(self.itr("g_hint_obj") if p[3] == "obj" else self.itr("g_nolist"))
+                self.gi_fill_items()
+        else:
+            self.gi_vars["hint"].set(self.itr("g_noitemfn"))
+            self.gi_cat = []
+            self.gi_fill_items()
+
+    def gi_set_enum(self, full):
+        e = self.gi_enums.get(full)
+        if not e:
+            return
+        self.gi_cur_enum = e
+        skip = re.compile(r"(?i)^(none|count|max|min|length|numberof|num[a-z]*|total|last|first|invalid|unknown|default|size|end|begin|all)$")
+        self.gi_cat = [(n, str(val)) for n, val in e["members"] if not skip.match(n)]
+        idx = self.gi_combo_keys.index(full) if full in self.gi_combo_keys else -1
+        if idx >= 0:
+            self.gi_combo.current(idx)
+        self.gi_vars["hint"].set(self.itr("g_hint_enum").format(n=len(e["members"]), e=e["name"]))
+        self.gi_fill_items()
+
+    def gi_enum_changed(self):
+        i = self.gi_combo.current()
+        if i >= 0:
+            self.gi_set_enum(self.gi_combo_keys[i])
+
+    def gi_fill_items(self):
+        tr = self.gi_itree
+        tr.delete(*tr.get_children())
+        w = self.gi_vars["efilter"].get().strip().lower()
+        for i, (n, val) in enumerate(self.gi_cat):
+            if not w or w in n.lower() or w in str(val).lower():
+                tr.insert("", "end", iid=str(i), values=(n, val))
+
+    # -- prepared candidates (items.json written by legacy\il2items.py prepare) ----------------------------------------------------
+    def gi_cand(self, r):
+        d = self.gi_dump_quiet()
+        if not d:
+            return None
+        try:
+            scan = json.load(open(os.path.join(d, "items.json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return next((c for c in scan.get("candidates", []) if c.get("rva") == r["rva"] and c.get("cls") == r["cls"] and c.get("method") == r["name"]), None)
+
+    @staticmethod
+    def gi_catalog_of(cand):
+        if not cand:
+            return []
+        p = next((x for x in cand["params"] if x.get("role") == "id"), None)
+        if not p:
+            return []
+        return [(c["name"], str(c.get("value", c.get("path", "")))) for c in (p.get("catalog") or [])]
+
+    def gi_prepare(self, then, use_entry):
+        """legacy il2items prepare for the selected function; then(cand) runs when it is done."""
+        r = self.gi_fn
+        d = self.items_dump_dir()
+        if not r or not d:
+            return
+        if self.items_busy:
+            self.gi_vars["info"].set(self.itr("status_busy"))
+            return
+        recv = self.gi_vars["recv"].get().strip()
+        args = [d, "prepare", r["fn"]]
+        if use_entry and recv and not r["static"]:
+            args += ["--receiver", recv]
+        self.gi_vars["info"].set(self.itr("g_prep"))
+
+        def done(rc, out, err):
+            for line in (out + "\n" + err).splitlines():
+                if line.strip():
+                    self.log(line)
+            if rc != 0:
+                self.gi_vars["info"].set((err.strip().splitlines() or ["prepare failed"])[-1][:300])
+                messagebox.showerror(self.itr("msg_error"), (err.strip().splitlines() or ["prepare failed"])[-1][:400], parent=self.items_win)
+                return
+            cand = self.gi_cand(r)
+            if cand:
+                rp = (cand.get("receiver") or {}).get("path", "")
+                if rp and not r["static"]:
+                    self.gi_vars["recv"].set(rp)
+                cat = self.gi_catalog_of(cand)
+                if cat and not (self.gi_combo.get() and self.gi_cat):
+                    self.gi_cat = cat
+                    self.gi_fill_items()
+                self.gi_vars["info"].set(self.itr("g_ready").format(r=rp or "-") if cand.get("callable") else self.itr("g_notready").format(w=cand.get("why") or "?"))
+            then(cand)
+        self.items_run(self.GI_LEGACY, args, done)
+
+    def gi_find(self):
+        if not self.gi_fn:
+            messagebox.showinfo("Items", self.itr("g_nofn"), parent=self.items_win)
+            return
+        self.gi_prepare(lambda cand: None, use_entry=False)
+
+    # -- items / amount ----------------------------------------------------------------------------------------------------------------
+    def gi_amount(self):
+        try:
+            return int(self.gi_vars["amount"].get().strip(), 0)
+        except ValueError:
+            return 1
+
+    def gi_chosen(self):
+        """[(label, value)] of the selected rows, or the manual item."""
+        sel = [self.gi_cat[int(i)] for i in self.gi_itree.selection()]
+        man = self.gi_vars["manual"].get().strip()
+        if man and not sel:
+            sel = [(man, man)]
+        return sel
+
+    def gi_specs(self, chosen):
+        """-> [(name, 'call:...')] for il2cheat, or None after telling the user why not."""
+        r = self.gi_fn
+        if not r:
+            messagebox.showinfo("Items", self.itr("g_nofn"), parent=self.items_win)
+            return None
+        recv = self.gi_vars["recv"].get().strip()
+        if not r["static"] and not recv:
+            messagebox.showinfo("Items", self.itr("g_norecv"), parent=self.items_win)
+            return None
+        texts = [sv.get().strip() for sv in self.gi_args]
+        uses_item = any("*" in t for t in texts)
+        editable = any("$*" in t for t in texts)                 # one rule, the item is a value cell in the trainer ($Member / $id)
+        if editable and chosen:
+            chosen = chosen[:1]
+        if uses_item and not chosen:
+            messagebox.showinfo("Items", self.itr("g_noitem"), parent=self.items_win)
+            return None
+        target = f"{recv}.{r['name']}" if not r["static"] else f"{r['cls']}.{r['name']}"
+        manual = bool(self.gi_vars["manual"].get().strip()) and not self.gi_itree.selection()
+        out = []
+        for label, val in (chosen if uses_item else [(r["name"], "")]):
+            exprs = []
+            for t, p in zip(texts, r["params"]):
+                if t == "$":
+                    t = "$" + str(self.gi_amount())
+                if "*" in t:
+                    if p[3] == "string":
+                        messagebox.showinfo("Items", self.itr("g_nostr"), parent=self.items_win)
+                        return None
+                    if p[3] == "enum" and not (manual and str(val).lstrip("-").isdigit()):
+                        sub = f"{p[0]}.{label}"
+                    else:
+                        sub = str(val)
+                    t = t.replace("*", sub)
+                exprs.append(t)
+            name = f"Any {self.gi_vars['enum'].get().split(' ')[0] or 'item'} (edit the value)" if editable else ("Give " + label) if uses_item else r["name"]
+            out.append((name, f"call:{target}({', '.join(exprs)})"))
+        return out
+
+    def gi_add_rules(self):
+        specs = self.gi_specs(self.gi_chosen())
+        if specs is None:
+            return
+        n = self._add_rule_rows([(name, path, "") for name, path in specs])
+        messagebox.showinfo("Items", self.itr("msg_added").format(n=n), parent=self.items_win)
+
+    def gi_copy(self):
+        specs = self.gi_specs(self.gi_chosen())
+        if specs is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(f"{n}={p}" for n, p in specs))
+        self.gi_vars["info"].set("📋 " + str(len(specs)))
+
+    # -- give now (legacy live engine) ------------------------------------------------------------------------------------------------------
+    def gi_give_now(self):
+        r = self.gi_fn
+        if not r:
+            messagebox.showinfo("Items", self.itr("g_nofn"), parent=self.items_win)
+            return
+        d = self.items_dump_dir()
+        ip = self.entry_ip.get().strip()
+        if not d:
+            return
+        if not ip:
+            messagebox.showwarning("Items", self.itr("g_noip"), parent=self.items_win)
+            return
+        texts = [sv.get().strip() for sv in self.gi_args]
+        chosen = self.gi_chosen()
+        if any("*" in t for t in texts) and not chosen:
+            messagebox.showinfo("Items", self.itr("g_noitem"), parent=self.items_win)
+            return
+        if not r["static"] and not self.gi_vars["recv"].get().strip():
+            if not messagebox.askyesno("Items", self.itr("g_norecv") + "\n\n" + self.itr("g_find"), parent=self.items_win):
+                return
+        messagebox.showwarning(self.itr("g_give"), self.itr("g_live_warn"), parent=self.items_win)
+        amt = self.gi_amount()
+
+        def go(cand):
+            if not cand or not cand.get("callable"):
+                messagebox.showwarning("Items", self.itr("g_notready").format(w=(cand or {}).get("why") or "?"), parent=self.items_win)
+                return
+            has_id = any(p.get("role") == "id" for p in cand["params"])
+            toks = [f"{(lab or '').replace('=', '-')}={amt}" for lab, _ in chosen] if has_id else [str(amt)]
+            if has_id and not chosen:
+                messagebox.showinfo("Items", self.itr("g_noitem"), parent=self.items_win)
+                return
+
+            def done(rc, out, err):
+                for line in (out + "\n" + err).splitlines():
+                    if line.strip():
+                        self.log(line)
+                if rc == 0:
+                    self.gi_vars["info"].set(self.itr("g_given").format(n=len(toks)))
+                    messagebox.showinfo("Items", self.itr("g_given").format(n=len(toks)), parent=self.items_win)
+                else:
+                    msg = (err.strip().splitlines() or out.strip().splitlines() or ["?"])[-1][:300]
+                    messagebox.showwarning("Items", self.itr("g_failed") + "\n\n" + msg, parent=self.items_win)
+            self.items_run(self.GI_LEGACY, [d, "give", cand["fn"]] + toks + ["--host", ip], done)
+        self.gi_prepare(go, use_entry=True)
+
+    def _add_rule_rows(self, rows):
+        """rows = [(name, path, value)] -> cheat rules of section 2 (an empty placeholder row goes, duplicates are skipped)."""
+        for r in [r for r in self.cheat_rows if not (r['name'].get().strip() or r['path'].get().strip() or r['value'].get().strip())]:
+            r['frame'].destroy()
+            self.cheat_rows.remove(r)
+        have = {r['path'].get().strip() for r in self.cheat_rows}
+        n = 0
+        for name, path, value in rows:
+            if path not in have:
+                self.add_cheat_row(name, path, value)
+                have.add(path)
+                n += 1
+        self.save_config()
+        return n
+
+    def items_search(self):
+        d = self.items_dump_dir()
+        if not d:
+            return
+        try:
+            amount = str(int(self.items_amount.get().strip(), 0))
+        except ValueError:
+            amount = "1"
+        args = [d, "--amount", amount] + (["--all"] if self.items_all.get() else [])
+        if self.items_enum.get().strip():
+            args += ["--enum", self.items_enum.get().strip()]
+        if self.items_method.get().strip():
+            args += ["--method", self.items_method.get().strip()]
+
+        def done(rc, out, err):
+            for line in (out + "\n" + err).splitlines():
+                if line.strip():
+                    self.log(line)
+            if rc != 0 and not out.strip():
+                messagebox.showerror(self.itr("msg_error"), (err.strip().splitlines() or ["failed"])[-1][:400], parent=self.items_win)
+                return
+            enums, self.items_rows = parse_il2items(out)
+            self.items_enums_lbl.config(text=self.itr("msg_enums").format(e=enums) if enums else "")
+            self.items_fill()
+            if not self.items_rows:
+                messagebox.showinfo("Items", self.itr("msg_none"), parent=self.items_win)
+        self.items_run("il2items.py", args, done)
+
+    def items_fill(self):
+        tr = self.items_tree
+        tr.delete(*tr.get_children())
+        word = self.items_filter.get().strip().lower()
+        for i, (group, name, spec, note) in enumerate(self.items_rows):
+            if word and word not in spec.lower() and word not in group.lower():
+                continue
+            tr.insert("", "end", iid=str(i), values=(name, spec, (self.itr("msg_template") + ": " if note else "") + group))
+
+    def items_add_selected(self):
+        sel = self.items_tree.selection()
+        if not sel:
+            messagebox.showwarning("Items", self.itr("warn_select"), parent=self.items_win)
+            return
+        rows = [rule_from_spec(self.items_rows[int(i)][2], "Give ") for i in sel]
+        for i in sel:                                            # this.Method(...) specs need the owner's Update hooked
+            m = re.search(r"--hook (\S+)", self.items_rows[int(i)][0])
+            if m:
+                rows.insert(0, ("hook", "hook:" + m.group(1).rstrip(")"), ""))
+                break
+        n = self._add_rule_rows(rows)
+        messagebox.showinfo("Items", self.itr("msg_added").format(n=n), parent=self.items_win)
+
+    def methods_search(self):
+        d = self.items_dump_dir()
+        if not d:
+            return
+        word = self.methods_word.get().strip()
+        args = [d, "--methods"] + ([word] if word else [])
+
+        def done(rc, out, err):
+            if rc != 0 and not out.strip():
+                messagebox.showerror(self.itr("msg_error"), (err.strip().splitlines() or ["failed"])[-1][:400], parent=self.items_win)
+                return
+            tr = self.methods_tree
+            tr.delete(*tr.get_children())
+            rows = parse_methods(out)
+            for i, (live, who, sig, hint) in enumerate(rows):
+                tr.insert("", "end", iid=str(i), values=(live, who, sig, hint))
+            self.methods_rows = rows
+            self.items_status.set(f"{len(rows)} methods")
+            if not rows:
+                messagebox.showinfo("Methods", self.itr("msg_none"), parent=self.items_win)
+        self.items_run("il2live.py", args, done)
+
+    def methods_add_selected(self):
+        sel = self.methods_tree.selection()
+        if not sel:
+            messagebox.showwarning("Items", self.itr("warn_select"), parent=self.items_win)
+            return
+        rows, skipped = [], 0
+        for i in sel:
+            live, who, sig, hint = self.methods_rows[int(i)]
+            if not hint:
+                skipped += 1
+                continue
+            target = hint.split(":", 1)[1]
+            if hint.startswith("patch:"):
+                target = target.rsplit("=", 1)[0]
+            name = target.split("(")[0].rsplit(".", 1)[-1] or "Cheat"
+            rows.append(rule_from_spec(f"{name}={hint}"))
+        if not rows:
+            messagebox.showinfo("Items", self.itr("msg_nohint"), parent=self.items_win)
+            return
+        n = self._add_rule_rows(rows)
+        messagebox.showinfo("Items", self.itr("msg_added").format(n=n) + (("\n\n" + self.itr("msg_nohint")) if skipped else ""), parent=self.items_win)
+
     def move_cheat_row(self, row_frame, direction):
         idx = next((i for i, item in enumerate(self.cheat_rows) if item['frame'] == row_frame), None)
         if idx is None:
@@ -1351,8 +2250,20 @@ class IL2CppDumperGUI:
         args = [script_path, abs_dump_dir, path, "--host", ip, "--set", value]
         self.execute_command_in_thread(args, is_dump=False)
 
+    @staticmethod
+    def rule_spec(n, p, v):
+        """il2cheat spec of a rule row: Name=path=value | Name=patch:Class.Method=mode | Name=call:Path.Method(args) (no value cell)."""
+        if not n or not p or p.startswith("hook:"):            # hook:Class row = --hook, not a cheat
+            return None
+        if p.startswith("call:"):
+            return f"{n}={p}"
+        return f"{n}={p}={v}" if v else None
+
     def run_single_test_rule(self, entry_path_widget, entry_val_widget):
         t = TRANSLATIONS[self.current_lang]
+        if entry_path_widget.get().strip().startswith(("call:", "patch:", "hook:")):
+            messagebox.showinfo("Test", self.itr("msg_note"), parent=self.root)
+            return
         messagebox.showwarning(t["live_warn_title"], t["live_warn_msg"], parent=self.root)
 
         ip = self.entry_ip.get().strip()
@@ -1402,7 +2313,7 @@ class IL2CppDumperGUI:
             messagebox.showwarning("Warning", t["warn_select_session_first"])
             return
 
-        rules_to_test = [(item['path'].get().strip(), item['value'].get().strip()) for item in self.cheat_rows if item['path'].get().strip() and item['value'].get().strip()]
+        rules_to_test = [(item['path'].get().strip(), item['value'].get().strip()) for item in self.cheat_rows if item['path'].get().strip() and item['value'].get().strip() and not item['path'].get().strip().startswith(("call:", "patch:", "hook:"))]
         if not rules_to_test:
             return
 
@@ -1950,6 +2861,7 @@ class IL2CppDumperGUI:
         self.btn_suggestions.config(text=t["btn_suggestions"])
         self.btn_export_rules.config(text=t["btn_export_rules"])
         self.btn_import_rules.config(text=t["btn_import_rules"])
+        self.btn_items.config(text=self.itr("btn_items"))
         self.btn_cheat.config(text=t["btn_cheat"])
         self.btn_test.config(text=t["btn_test_all"])
         self.btn_export_console.config(text=t["btn_export_console"])
@@ -2111,7 +3023,7 @@ class IL2CppDumperGUI:
     def run_cheat(self):
         t = TRANSLATIONS[self.current_lang]
         dump_path = self.entry_dump_path.get().strip()
-        cheat_rules = [f"{item['name'].get().strip()}={item['path'].get().strip()}={item['value'].get().strip()}" for item in self.cheat_rows if item['name'].get().strip() and item['path'].get().strip() and item['value'].get().strip()]
+        cheat_rules = [r for r in (self.rule_spec(item['name'].get().strip(), item['path'].get().strip(), item['value'].get().strip()) for item in self.cheat_rows) if r]
 
         if not dump_path or not cheat_rules:
             messagebox.showwarning("Warning", t["warn_fields"])
@@ -2141,7 +3053,8 @@ class IL2CppDumperGUI:
         self.save_config()
 
         script_path = os.path.join(TOOLS_DIR, "il2cheat.py")
-        args = [script_path, abs_dump_dir, target_tlh_path, "--game", self.current_game_key, "--version", "1.00"] + cheat_rules
+        hooks = [item['path'].get().strip()[5:].strip() for item in self.cheat_rows if item['path'].get().strip().startswith("hook:")]
+        args = [script_path, abs_dump_dir, target_tlh_path, "--game", self.current_game_key, "--version", "1.00"] + (["--hook", hooks[-1]] if hooks and hooks[-1] else []) + cheat_rules
 
         if self.is_running:
             return
@@ -2168,7 +3081,7 @@ class IL2CppDumperGUI:
                                 content = f.read()
                             
                             content = re.sub(r'Creator="[^"]*"', f'Creator="{creator_name}"', content)
-                            content = content.replace('IL2CPP hook (OcclusionManager.Update)', 'Master Code')
+                            content = re.sub(r'IL2CPP hook \([^)]*\)', 'Master Code', content)
                             
                             with open(abs_tlh_path, "w", encoding="utf-8") as f:
                                 f.write(content)
