@@ -49,8 +49,14 @@ python il2cheat.py castle "Castlevania_PPSA35399.TLH" --game "Castlevania: Belmo
 
 Trainer notes: `call:` cheats run inside the hook cave: the paths are resolved first (flag stays 1 and the call is retried next frame
 until every object exists), then the flag goes to 2 and the method is called System V style (`this`, arguments, `MethodInfo* = 0`,
-floats in xmm0..; rdi/rsi/r10/r11 saved, stack aligned). `MethodInfo* = 0` is enough for plain methods; a method that reads it
-(generic sharing, some virtual thunks) would crash, so test a new call on the console with a save you can lose. `patch:` cheats are
+floats in xmm0..). A method may throw (a `NullReferenceException` in MOUSE's `TryUnlockingWeapon` ended the process with
+"terminate is called": il2cpp raises a C++ exception, the unwinder found no unwind info for the cave's return address). So the
+cave pops its frame, builds a frame shaped like a module function's (`push rbp; mov rbp, rsp; push rbx...`, found through the
+module's `.eh_frame` by `ehframe.py`) with the hooked method's return address above it and lets the method return into that
+function's `pop rbp; ret`: the unwinder reads that row and continues at the hooked method's caller, where il2cpp's invoke catch
+logs the exception as usual; on a normal return the gadget pops the cave's continuation and the hooked method runs normally.
+`MethodInfo* = 0` is enough for plain methods; a method that reads it (generic sharing, some virtual thunks) would crash, so
+test a new call on the console with a save you can lose. `patch:` cheats are
 TLH `Assembly` entries at the method's first bytes (`mov eax, 1` / `ret`; unique 16+ byte AOB in the module text) and hit every
 caller, enemies included; a method that is inlined into its callers cannot be patched this way (il2cpp rarely inlines across
 methods, the dumper's RVA is the out-of-line body). Both kinds follow ReaperPy's unity_items / values_auto (MIT, Ston3dd) in idea,

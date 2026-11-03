@@ -23,7 +23,7 @@ caches use per-session hash codes as keys. String/_guid keys fall back to the en
 (ponytail: the entry order of a Dictionary only changes on remove, documented in the comment).
 """
 import json, os, re, struct, sys
-import il2live
+import il2live, ehframe
 from il2live import KLASS_STATICS, KLASS_PARENT, PRIM, split_generic, elem_size, instances, instances_of
 
 MODULE = "Il2CppUserAssemblies.prx"
@@ -292,6 +292,19 @@ def module_text(rt, dump):
     return text, dump.m[text["offset"]:text["offset"] + text["end"] - text["start"]]
 
 
+def return_gadget(rt, dump):
+    """(RVA, registers) of the `pop rbp; ret` a called method returns through (ehframe.find_gadget), or None without unwind info."""
+    text, blob = module_text(rt, dump)
+    for r in dump.regs:
+        if r["name"] == rt.module and r["prot"] & 1 and not r["prot"] & 4:
+            rb = dump.m[r["offset"]:r["offset"] + r["end"] - r["start"]]
+            eh = ehframe.EhFrame.find(rb, r["start"], text["start"], text["end"])
+            g = eh and ehframe.find_gadget(eh, blob, text["start"])
+            if g:
+                return g
+    return None
+
+
 def unique_aob(blob, rva):
     """Shortest 16..92 byte pattern at rva that occurs once in the module's text, else None."""
     for length in range(16, 96, 4):
@@ -409,7 +422,7 @@ def ret_asm(res, ret, mode, who):
     sys.exit(f"{who}: return type {ret} is an object/struct, not patchable")
 
 
-async def compile_call(res, rt, read, base, k, target, this_info, roots, images):
+async def compile_call(res, rt, read, base, k, target, this_info, roots, images, gadget=None):
     """'Path.Method(args)' or 'Class.Method(args)' (static) -> (asm lines, GetMem lines, RegisterSymbol lines, cheat value entries, text).
     Arguments: numbers, enum members (Weapons.Revolver or Revolver), true/false, null, $n / $Member (editable value cell with default n),
     or a path (Class::... / this....) for an object parameter. System V order (this, args..., MethodInfo* = 0); floats in xmm."""
@@ -498,12 +511,27 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images)
             sys.exit(f"{who}: {ptype} parameters take a path to an object or null")
     syms.append(f"RegisterSymbol( Call{k}, ModuleBase+{meth.rva:#x} )")
     cm, ce = cell_entries(cells); mems += cm; entries += ce
-    code += [f"mov byte ptr [Flag{k}], 2",                                      # once per switch-on, only after every path resolved
-             "push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8"]       # entry rsp = 8 mod 16, 6 saves in the frame + 4 here: sub 8 aligns
-    if not meth.static:
-        code.append(f"mov rdi, [This{k}]")
-    code += loads + [f"xor {REG32[INT_REGS[ints]]}, {REG32[INT_REGS[ints]]}",   # MethodInfo* = 0 (ponytail: enough for plain methods; generic/virtual thunks may read it)
-                     f"movabs rax, Call{k}", "call rax", "add rsp, 8", "pop r11", "pop r10", "pop rsi", "pop rdi"]
+    code.append(f"mov byte ptr [Flag{k}], 2")                                   # once per switch-on, only after every path resolved
+    call = ([f"mov rdi, [This{k}]"] if not meth.static else []) + loads + \
+           [f"xor {REG32[INT_REGS[ints]]}, {REG32[INT_REGS[ints]]}", f"movabs rax, Call{k}"]   # MethodInfo* = 0 (enough for plain methods)
+    if gadget:
+        # The method may throw (il2cpp raises a C++ exception); the unwinder needs unwind info for every return address on
+        # the stack and the cave has none ("terminate is called" ended MOUSE). So the cave frame is popped, a frame shaped
+        # like the gadget function's (push rbp; mov rbp, rsp; push regs) is built with the hooked method's return address
+        # above it, and the method returns into `pop rbp; ret` of that function: unwinding passes that row to the hooked
+        # method's caller (il2cpp's catch logs the exception), a normal return pops our continuation and the cave goes on.
+        regs = gadget[1]
+        pad = ["sub rsp, 8"] if len(regs) % 2 else []                           # callee entry rsp = 8 mod 16
+        mems.append(f"GetMem( InCall{k}, 1 )")
+        code += ["pop r9", "pop r8", "pop rdx", "pop rcx", "pop rax", "popfq", "push rbp", "mov rbp, rsp"] + [f"push {r}" for r in regs] + \
+                ["push rdi", "push rsi"] + pad + [f"mov byte ptr [InCall{k}], 0",    # also left at 1 by a call that threw
+                 f"call c{k}_pc", f"c{k}_pc:", f"cmp byte ptr [InCall{k}], 1", f"je c{k}_back",
+                 f"mov byte ptr [InCall{k}], 1", "push qword ptr [rbp]"] + call + ["movabs r10, Gadget", "push r10", "jmp rax",
+                 f"c{k}_back:", f"mov byte ptr [InCall{k}], 0"] + (["add rsp, 8"] if pad else []) + ["pop rsi", "pop rdi"] + \
+                ([f"add rsp, {8 * len(regs):#x}"] if regs else []) + ["pop rbp", "pushfq", "push rax", "push rcx", "push rdx", "push r8", "push r9"]
+    else:                                                                       # no unwind info found: plain call, a throwing method ends the process
+        code += ["push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8"] + call + \
+                ["call rax", "add rsp, 8", "pop r11", "pop r10", "pop rsi", "pop rdi"]
     code += [f"c{k}_{i}_end:" for i in range(len(args))]
     return code, mems, syms, entries, f"{meth.sig} [{'static' if meth.static else 'this=' + obj_path}] RVA {meth.rva:#x}"
 
@@ -521,6 +549,18 @@ async def amain(a):
         return dump.read(va, n)
 
     images, roots, hook = {"Assembly-CSharp.dll"}, set(), None       # game assemblies: Assembly-CSharp plus whatever the roots live in
+    gadget = None
+
+    def need_gadget():
+        nonlocal gadget
+        if gadget is None:
+            gadget = return_gadget(rt, dump) or False
+            if gadget:
+                syms.append(f"RegisterSymbol( Gadget, ModuleBase+{gadget[0]:#x} )")
+                print(f"return gadget: pop rbp; ret at {a.module}+{gadget[0]:#x} (frame: rbp{''.join(', ' + r for r in gadget[1])}); a throwing method is caught by il2cpp")
+            else:
+                print("no unwind info / gadget in the module: call cheats are plain calls, a throwing method ends the process")
+        return gadget or None
 
     def need_hook():
         """Pick the hook once; a this. path needs it before its own compilation (the hooked class is the root)."""
@@ -561,7 +601,7 @@ async def amain(a):
             continue
         mems.append(f"GetMem( Flag{k}, 1 )")
         if rest.startswith("call:"):                     # Name=call:Path.Method(args): once per switch-on
-            code, cm, cs, ce, text_ = await compile_call(res, rt, read, rt.base, k, rest[5:], this_info(rest), roots, images)
+            code, cm, cs, ce, text_ = await compile_call(res, rt, read, rt.base, k, rest[5:], this_info(rest), roots, images, need_gadget())
             blocks.append("\n".join([f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + code + [f"c{k}_end:"]))
             mems += cm; syms += cs; entries += ce
             cheats.append((name, entries, None))
