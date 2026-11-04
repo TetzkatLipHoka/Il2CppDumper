@@ -26,7 +26,7 @@ Layout facts (measured on PS4/PS5 dumps, metadata v29/v31, x64):
     String: length 0x10, UTF-16 chars from 0x14
     dump.cs gives 0x0 for every field of an open generic class, hence the fixed tables above
 """
-import argparse, json, mmap, os, re, struct, sys
+import argparse, bisect, json, mmap, os, re, struct, sys
 import numpy as np
 
 HEADER = 0x10
@@ -264,14 +264,14 @@ class Dump:
         self.path = os.path.join(d, json_name.replace(".json", ".bin"))
         self.fh = open(self.path, "rb")
         self.m = mmap.mmap(self.fh.fileno(), 0, access=mmap.ACCESS_READ)
-        self.starts = np.array([r["start"] for r in self.regs]); self.ends = np.array([r["end"] for r in self.regs])
-        self.offs = np.array([r["offset"] for r in self.regs])
+        self.starts = [r["start"] for r in self.regs]; self.ends = [r["end"] for r in self.regs]
+        self.offs = [r["offset"] for r in self.regs]
         self.pid, self.title = info.get("pid"), info.get("title_id")
 
     def off(self, va):
-        i = np.searchsorted(self.starts, va, side="right") - 1
+        i = bisect.bisect_right(self.starts, va) - 1                        # plain lists: numpy searchsorted costs 5 us per scalar
         if i >= 0 and va < self.ends[i]:
-            return int(self.offs[i] + va - self.starts[i])
+            return self.offs[i] + va - self.starts[i]
         return None
 
     def read(self, va, n):
@@ -845,9 +845,11 @@ async def dict_key_names(res, rt, read, ktype, entry, vtype=None, d=None):
                 entries = await read_u64(read, d + 0x18)
                 count = struct.unpack("<i", await read_(read, d + 0x20, 4))[0]
                 seen = {}
-                for n in range(count):
+                for n in range(min(count, 2048)):                   # Fantasma: 100k-entry caches cost minutes per dictionary
                     c = await value_class(res, rt, read, entries + 0x20 + n * 0x18)
                     seen[c] = seen.get(c, 0) + 1
+                if count > 2048:                                     # unchecked rest: no class counts as unique
+                    seen = {c: 2 for c in seen}
                 rt.dict_classes[key] = seen
             names = [cls] + names if rt.dict_classes[key].get(cls) == 1 else names + [cls]
         return names
@@ -952,6 +954,7 @@ async def find(res, rt, read, base, word, depth, max_paths=1000, types=None, obj
                 if sk not in seen or (named and not seen[sk]):             # an object reached again through a path that
                     seen[sk] = named; nxt.append(child)                      # carries the word is walked once more (MainActor.*)
         frontier = nxt
+        print(f"# depth {level + 1}: {len(frontier)} objects to walk, {len(out)} hits so far", file=sys.stderr)
         if not frontier:
             break
     for _, line in sorted(out, key=lambda h: (h[0], h[1].count(".")))[:max_paths]:   # word in the field name first, then
