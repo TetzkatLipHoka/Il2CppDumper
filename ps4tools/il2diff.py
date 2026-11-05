@@ -13,7 +13,7 @@ For every hit the owner object is found through its klass pointer, then the refe
 backwards (fields, array elements, List<T>, Dictionary<K,V> entries) until a static field block is reached.
 Output per line: path<TAB>type<TAB>value in a<TAB>value in b, verified by resolving the path in both dumps.
 """
-import argparse, os, struct, sys
+import argparse, bisect, os, struct, sys
 import numpy as np
 import il2live
 from il2live import KLASS_STATICS, KLASS_PARENT, PRIM, split_generic
@@ -104,9 +104,11 @@ class Diff:
         if self._refs is None:
             d = self.a
             vals, addrs = [], []
+            starts = np.asarray(d.starts, dtype=np.uint64)        # il2live keeps them as plain lists (fast scalar bisect)
+            ends = np.asarray(d.ends, dtype=np.uint64)
             for r, a in d.arrays():
-                i = np.searchsorted(d.starts, a, side="right") - 1
-                ok = (i >= 0) & (a < d.ends[np.maximum(i, 0)])
+                i = np.searchsorted(starts, a, side="right").astype(np.int64) - 1
+                ok = (i >= 0) & (a < ends[np.maximum(i, 0)])
                 idx = np.nonzero(ok)[0]
                 vals.append(a[idx]); addrs.append(r["start"] + idx.astype(np.uint64) * 8)
             vals, addrs = np.concatenate(vals), np.concatenate(addrs)
@@ -125,7 +127,7 @@ class Diff:
         if i < 0:
             return None
         start = int(starts[i])
-        if va - start > maxback or np.searchsorted(d.starts, va, side="right") != np.searchsorted(d.starts, start, side="right"):
+        if va - start > maxback or bisect.bisect_right(d.starts, va) != bisect.bisect_right(d.starts, start):
             return None                                      # too far back or in another region
         return start, d.u64(start)
 

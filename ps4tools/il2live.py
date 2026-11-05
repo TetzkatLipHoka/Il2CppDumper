@@ -264,14 +264,15 @@ class Dump:
         self.path = os.path.join(d, json_name.replace(".json", ".bin"))
         self.fh = open(self.path, "rb")
         self.m = mmap.mmap(self.fh.fileno(), 0, access=mmap.ACCESS_READ)
-        self.starts = [r["start"] for r in self.regs]; self.ends = [r["end"] for r in self.regs]
-        self.offs = [r["offset"] for r in self.regs]
+        self.starts = np.array([r["start"] for r in self.regs]); self.ends = np.array([r["end"] for r in self.regs])
+        self.offs = np.array([r["offset"] for r in self.regs])                # numpy: vectorised users (il2diff, object_pools)
+        self._starts, self._ends, self._offs = self.starts.tolist(), self.ends.tolist(), self.offs.tolist()   # lists: off()
         self.pid, self.title = info.get("pid"), info.get("title_id")
 
     def off(self, va):
-        i = bisect.bisect_right(self.starts, va) - 1                        # plain lists: numpy searchsorted costs 5 us per scalar
-        if i >= 0 and va < self.ends[i]:
-            return self.offs[i] + va - self.starts[i]
+        i = bisect.bisect_right(self._starts, va) - 1                       # plain lists: numpy searchsorted costs 5 us per scalar
+        if i >= 0 and va < self._ends[i]:
+            return self._offs[i] + va - self._starts[i]
         return None
 
     def read(self, va, n):
