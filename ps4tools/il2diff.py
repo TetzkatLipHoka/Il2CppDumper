@@ -114,7 +114,7 @@ class Diff:
             vals, addrs = np.concatenate(vals), np.concatenate(addrs)
             order = np.argsort(vals, kind="stable")
             vals, addrs = vals[order], addrs[order]
-            self._refs = (vals, addrs, np.sort(addrs[np.isin(vals, self.klass_arr)]))
+            self._refs = (vals, addrs, np.sort(addrs[il2live.klass_hits(vals, self.klass_arr)]))
         return self._refs
 
     def owner(self, va, maxback=0x100000):
@@ -334,7 +334,7 @@ class Diff:
             if len(changed) == 0:
                 continue
             changed_words = set(changed.tolist()) if len(changed) < 1 << 20 else None
-            for idx in np.nonzero(np.isin(a, karr))[0]:
+            for idx in il2live.klass_hits(a, karr):
                 obj = r["start"] + int(idx) * 8
                 t = game[int(a[idx])]
                 objects += 1

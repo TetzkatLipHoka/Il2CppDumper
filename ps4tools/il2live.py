@@ -383,7 +383,7 @@ class Runtime:
         (arrays and generic instances carry runtime built names on the heap)."""
         d, out = self.d, {}
         for r, a in d.arrays():
-            for idx in np.nonzero(np.isin(a, name_arr))[0]:
+            for idx in klass_hits(a, name_arr):
                 if idx >= 2 and idx + 1 < len(a) and self.str0 <= int(a[idx + 1]) < self.str1:
                     out[r["start"] + int(idx) * 8 - KLASS_NAME] = d.cstr(int(a[idx]))
         images = {}
@@ -391,7 +391,7 @@ class Runtime:
             images[d.u64(k)] = images.get(d.u64(k), 0) + 1
         image_arr = np.array([i for i, c in images.items() if c >= 50], dtype=np.uint64)
         for r, a in d.arrays():
-            for idx in np.nonzero(np.isin(a, image_arr))[0]:
+            for idx in klass_hits(a, image_arr):
                 k = r["start"] + int(idx) * 8
                 if k in out or idx + 3 >= len(a) or not (self.str0 <= int(a[idx + 3]) < self.str1):
                     continue
@@ -486,6 +486,21 @@ class Runtime:
         return await read_u64(read, klass + KLASS_STATICS), klass
 
 
+def klass_hits(b, karr):
+    """np.nonzero(np.isin(b, karr))[0] for a big qword array b and a set of pointers karr (klass, name, image pointers ...).
+    np.isin sorts the whole region together with karr (minutes over a 6 GB dump); a range test plus a binary search of the
+    few survivors gives the same result in seconds."""
+    karr = np.unique(np.asarray(karr, dtype=np.uint64))
+    if len(karr) == 0:
+        return np.zeros(0, dtype=np.int64)
+    idx = np.nonzero((b >= karr[0]) & (b <= karr[-1]))[0]
+    if len(idx) == 0:
+        return idx
+    v = b[idx]
+    pos = np.minimum(np.searchsorted(karr, v), len(karr) - 1)
+    return idx[karr[pos] == v]
+
+
 def instances(rt, dump):
     """{klass: [object addresses]} over all dumped regions (cached on rt). An object start is a klass pointer whose next
     qword is the monitor (0 or a pointer outside the module) and whose fourth qword does not point into the metadata: that
@@ -502,7 +517,7 @@ def instances(rt, dump):
     for r, a in dump.arrays():
         if any(lo <= r["start"] < hi for lo, hi in mods) or r["name"] == "executable" or len(a) < 4 or dump.regs.index(r) in pools:
             continue
-        idx = np.nonzero(np.isin(a[:-3], rt.klass_arr))[0]
+        idx = klass_hits(a[:-3], rt.klass_arr)
         if len(idx) == 0:
             continue
         mon, fourth = a[idx + 1], a[idx + 3]
