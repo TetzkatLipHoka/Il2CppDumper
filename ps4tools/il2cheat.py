@@ -544,6 +544,9 @@ async def amain(a):
     if rt.table_off is None or rt.meta_off is None:
         sys.exit("TypeInfo table / metadata globals not found in the dump")
     script = json.load(open(os.path.join(a.dumpdir, "sdk", "script.json")))
+    for e in script["ScriptMethod"]:                    # SDK made with the module base as dump address: Address = VA
+        if e["Address"] >= rt.base:
+            e["Address"] -= rt.base
 
     async def read(va, n):
         return dump.read(va, n)

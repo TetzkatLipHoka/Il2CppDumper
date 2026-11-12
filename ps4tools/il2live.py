@@ -314,17 +314,31 @@ class Runtime:
         hdr = [struct.unpack_from("<ii", m, i + 8 + k * step) for k in range(31)]
         self.str0, self.str1 = self.meta + hdr[2][0], self.meta + hdr[2][0] + hdr[2][1]
         td_off, td_size = hdr[19]
-        self.td_count = struct.unpack_from("<i", m, i + 8 + 19 * step + 8)[0] if ver >= 39 else td_size // 0x58
-        self.td_size = td_size // self.td_count                     # sizeof(Il2CppTypeDefinition): 0x58 up to v31, 76 or 82 in the two v39 layouts
+        if ver >= 39:
+            self.td_count = struct.unpack_from("<i", m, i + 8 + 19 * step + 8)[0]
+        else:
+            # sizeof(Il2CppTypeDefinition): 0x58 from v27; up to v26 byrefTypeIndex is still there (92, Outer Wilds v24.2),
+            # v24.1 adds rgctxStartIndex/rgctxCount (100), v24.0 and older customAttributeIndex (104). The right one divides
+            # the section and gives string offsets for name and namespace of the first typedefs.
+            strs = hdr[2][1]
+            ok = lambda s: td_size % s == 0 and all(0 <= x < strs for k in range(1, min(17, td_size // s))
+                                                    for x in struct.unpack_from("<ii", m, i + td_off + k * s))
+            self.td_count = td_size // next((s for s in ((0x58,) if ver >= 27 else (92, 100, 104)) if ok(s)), 0x58)
+        self.td_size = td_size // self.td_count                     # 76 or 82 in the two v39 layouts
         self.td_off = td_off
         self.typedef_names = {t.idx: t.full for t in types.values()}
         self.module = module
         self.base = dump.module_base(module)
+        for t in types.values():                        # SDK made with the module base as dump address (Outer Wilds): RVA = VA
+            for ms in t.sigs.values():
+                for mt in ms:
+                    if mt.rva >= self.base:
+                        mt.rva -= self.base
         self._type_cache = {}
         cache = dump.path + ".klasses.json"            # the two numpy passes take ~50 s on a 3 GB dump
         try:
             c = json.load(open(cache))
-            assert c["size"] == os.path.getsize(dump.path)
+            assert c["size"] == os.path.getsize(dump.path) and c.get("td_size", self.td_size if ver >= 27 else 0) == self.td_size   # caches without td_size were wrong before v27
             self.klasses = {int(k): v for k, v in c["klasses"].items()}
             self.table_off = c["table_off"]
             self.meta_off = c["meta_off"]
@@ -343,7 +357,7 @@ class Runtime:
                 self.by_full.setdefault(self.full_name(k), []).append(k)
             self.table_off = self.find_table_off()
             self.meta_off = self.find_pointer_off(self.meta)
-            json.dump({"size": os.path.getsize(dump.path), "klasses": self.klasses, "table_off": self.table_off, "meta_off": self.meta_off}, open(cache, "w"))
+            json.dump({"size": os.path.getsize(dump.path), "td_size": self.td_size, "klasses": self.klasses, "table_off": self.table_off, "meta_off": self.meta_off}, open(cache, "w"))
         self.klass_arr = np.array(sorted(self.klasses), dtype=np.uint64)
         self.by_full = {}
         for k in self.klasses:
