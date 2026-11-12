@@ -328,6 +328,13 @@ class Runtime:
             self.klasses = {int(k): v for k, v in c["klasses"].items()}
             self.table_off = c["table_off"]
             self.meta_off = c["meta_off"]
+            if self.table_off is None:                 # older cache without the table: look for it again
+                self.by_full = {}
+                for k in self.klasses:
+                    self.by_full.setdefault(self.full_name(k), []).append(k)
+                self.table_off = self.find_table_off()
+                c["table_off"] = self.table_off
+                json.dump(c, open(cache, "w"))
         except Exception:
             name_vas = {self.str0 + struct.unpack_from("<i", m, i + td_off + k * self.td_size)[0] for k in range(self.td_count)}
             self.klasses = self.find_klasses(np.array(sorted(name_vas), dtype=np.uint64))
@@ -362,20 +369,43 @@ class Runtime:
 
     def find_table_off(self):
         """Module offset of the il2cpp global that points at the Il2CppClass* table indexed by TypeDefIndex
-        (MetadataCache s_TypeInfoDefinitionTable). Session independent, so live roots never depend on dump addresses."""
+        (MetadataCache s_TypeInfoDefinitionTable). Session independent, so live roots never depend on dump addresses.
+        Older Unity (2019 and earlier) fills that table lazily: classes the game has not used yet are NULL there. So
+        every slot that holds a known class votes for "table = slot - 8 * TypeDefIndex" (one pass over the dump) and
+        the address with most votes wins; empty slots do not count against it."""
         d = self.d
-        probes = [(t.idx, self.by_full[t.full][0]) for t in self.types.values() if t.kind == "class" and t.full in self.by_full and len(self.by_full[t.full]) == 1][:40]
-        if len(probes) < 5:
+        idx_of = {}
+        for t in self.types.values():
+            ks = self.by_full.get(t.full)
+            if t.kind == "class" and ks and len(ks) == 1:
+                idx_of[ks[0]] = t.idx
+        if len(idx_of) < 5:
+            print(f"TypeInfo table: only {len(idx_of)} unique classes to probe", file=sys.stderr)
             return None
-        i0, k0 = probes[0]
+        karr = np.array(sorted(idx_of), dtype=np.uint64)
+        tdi = np.array([idx_of[int(k)] for k in karr], dtype=np.int64)
+        votes = {}
         for r, a in d.arrays():
-            for idx in np.nonzero(a == np.uint64(k0))[0]:
-                table = r["start"] + int(idx) * 8 - 8 * i0
-                if all(d.u64(table + 8 * i) == k for i, k in probes[1:]):
-                    for r2, a2 in d.arrays():
-                        if r2["name"] == self.module:
-                            for j in np.nonzero(a2 == np.uint64(table))[0]:
-                                return r2["start"] + int(j) * 8 - self.base
+            hits = klass_hits(a, karr)
+            if not len(hits):
+                continue
+            pos = np.searchsorted(karr, a[hits])
+            tables = r["start"] + hits.astype(np.int64) * 8 - 8 * tdi[pos]
+            u, c = np.unique(tables, return_counts=True)
+            for t, n in zip(u[c >= 3].tolist(), c[c >= 3].tolist()):
+                votes[t] = votes.get(t, 0) + n
+        for table, n in sorted(votes.items(), key=lambda x: -x[1])[:5]:
+            if n < 8:
+                break
+            for r2, a2 in d.arrays():
+                if r2["name"] == self.module:
+                    for j in np.nonzero(a2 == np.uint64(table))[0]:
+                        off = r2["start"] + int(j) * 8 - self.base
+                        print(f"TypeInfo table {table:#x} ({n} classes filled in), global at {self.module}+{off:#x}",
+                              file=sys.stderr)
+                        return off
+            print(f"TypeInfo table candidate {table:#x} ({n} classes) has no pointer in {self.module}", file=sys.stderr)
+        print("TypeInfo table not found", file=sys.stderr)
         return None
 
     def find_klasses(self, name_arr):
@@ -1185,7 +1215,7 @@ async def amain(a):
     types = parse_dump_cs(os.path.join(a.dumpdir, "sdk", "dump.cs"))
     rt = Runtime(dump, types, a.module)
     res = Resolver(rt)
-    print(f"{len(types)} types, {len(rt.klasses)} runtime classes, metadata {rt.meta:#x}, TypeInfo table at {a.module}+{rt.table_off:#x}", file=sys.stderr)
+    print(f"{len(types)} types, {len(rt.klasses)} runtime classes, metadata {rt.meta:#x}, TypeInfo table at " + (f"{a.module}+{rt.table_off:#x}" if rt.table_off is not None else "NOT FOUND (static roots unavailable)"), file=sys.stderr)
 
     if a.host:
         import ps4debug
