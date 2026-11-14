@@ -1,6 +1,8 @@
 # Il2CppDumper
 
-[![Build status](https://ci.appveyor.com/api/projects/status/anhqw33vcpmp8ofa?svg=true)](https://ci.appveyor.com/project/Perfare/il2cppdumper/branch/master/artifacts)
+Fork of [Perfare/Il2CppDumper](https://github.com/Perfare/Il2CppDumper) with PlayStation 4 / 5 support, Unity 6 metadata,
+protected PE files and a set of Python tools for live values and trainers (`ps4tools`).
+Builds are on the [releases page](https://github.com/TetzkatLipHoka/Il2CppDumper/releases).
 
 中文说明请戳[这里](README.zh-CN.md)
 
@@ -9,18 +11,24 @@ Unity il2cpp reverse engineer
 ## Features
 
 * Complete DLL restore (except code), can be used to extract `MonoBehaviour` and `MonoScript`
-* Supports ELF, ELF64, Mach-O, PE, NSO and WASM format
-* Supports Unity 5.3 - 2022.2
+* Supports ELF, ELF64, Mach-O, PE, NSO and WASM format, plus PS4 / PS5 `prx` and fake-signed SELF
+* Supports Unity 5.3 - 2022.3 (metadata v16 - v31) and Unity 6000.3 (metadata v39, tested with 6000.3.13f1);
+  metadata v32 - v38 is not supported
 * Supports generate IDA, Ghidra and Binary Ninja scripts to help them better analyze il2cpp files
 * Supports generate structures header file
 * Supports Android memory dumped `libil2cpp.so` file to bypass protection
-* Support bypassing simple PE protection
+* Support bypassing simple PE protection (the PE loader runs the file, see `NoPELoader`); protected PE files whose code
+  and data are still plain text (Denuvo) are found statically
+* Supports dumping from a memory dump of a running PS4 / PS5 game (`ps4tools/il2mem.py`)
 
 ## Usage
 
 Run `Il2CppDumper.exe` and choose the il2cpp executable file and `global-metadata.dat` file, then enter the information as prompted
 
 The program will then generate all the output files in current working directory
+
+Release archives: `net10-win-x64` / `net10-win-x86` are small and need the .NET 10 runtime, `aot-win-x64` / `aot-win-x86`
+are NativeAOT builds that need no runtime.
 
 ### PlayStation 4 / 5 (this fork)
 
@@ -40,8 +48,13 @@ Decrypted PS4/PS5 `Il2CppUserAssemblies.prx` (ELF `e_type` 0xFE18, no section he
   `--find word|value` lists paths from every static field. Needs numpy, live access needs the `ps4debug` module.
 * `ps4tools/il2diff.py` compares two dumps of one game session (`--eq 50 77`: value before and after) and turns every
   hit into an il2live path by walking the object references back to a static field, verified against both dumps.
+* `ps4tools/il2cheat.py` writes a TLH trainer from il2live paths: frozen values, `call:` (run a game method once, e.g.
+  give an item) and `patch:` (force a method's return value) cheats. `ps4tools/il2items.py` proposes the "give item"
+  rules of a game, `ps4tools/gui_il2cpp_dumper.py` (by talixme) is a Tk front end for the whole chain.
 * When LTO folded `Il2CppCodeRegistration` into code (seen in Blasphemous 2), it is reconstructed from the
   code gen module table, the generic method pointer table and the invoker table (`Utils/LtoSearch.cs`).
+
+All tools, the path syntax and the notes measured on real games are described in [ps4tools/README.md](ps4tools/README.md).
 
 ## Command-line
 
@@ -100,7 +113,7 @@ Available options:
 * `DumpMethod`, `DumpField`, `DumpProperty`, `DumpAttribute`, `DumpFieldOffset`, `DumpMethodOffset`, `DumpTypeDefIndex`
   * Whether to output these information to dump.cs
 
-* `GenerateDummyDll`, `GenerateScript`
+* `GenerateDummyDll`, `GenerateStruct`
   * Whether to generate these things
 
 * `DummyDllAddToken`
@@ -117,6 +130,7 @@ Available options:
 
 * `NoRedirectedPointer`
   * Treat pointers in dumped files as unredirected, This option needs to be `true` for files dumped from some devices
+
 * `NoPELoader`
   * On Windows the dumper falls back to a "custom PE loader" when the static search finds nothing: it loads the
     file with `LoadLibrary`, which runs the file's own startup code inside the dumper. `true` forbids that; use it
@@ -135,7 +149,7 @@ If your file is `libil2cpp.so` and you have a rooted Android phone, you can try 
 
 Please note that the executable file for the PC platform is `GameAssembly.dll` or `*Assembly.dll`
 
-You can open a new issue and upload the file, I will try to solve.
+With `NoPELoader` set, a PE file that the static search cannot handle ends here instead of being loaded.
 
 #### `ERROR: This file may be protected.`
 
@@ -145,4 +159,6 @@ If you have a rooted Android phone, you can try my other project [Zygisk-Il2CppD
 
 ## Credits
 
+- Perfare - [Il2CppDumper](https://github.com/Perfare/Il2CppDumper), the project this fork is based on
+- talixme - testing on PS4 / PS5, the GUI and several fixes in `ps4tools`
 - Jumboperson - [Il2CppDumper](https://github.com/Jumboperson/Il2CppDumper)
