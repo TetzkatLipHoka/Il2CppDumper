@@ -12,8 +12,9 @@ Unity il2cpp reverse engineer
 
 * Complete DLL restore (except code), can be used to extract `MonoBehaviour` and `MonoScript`
 * Supports ELF, ELF64, Mach-O, PE, NSO and WASM format, plus PS4 / PS5 `prx` and fake-signed SELF
-* Supports Unity 5.3 - 2022.3 (metadata v16 - v31) and Unity 6000.3 (metadata v39, tested with 6000.3.13f1);
-  metadata v32 - v38 is not supported
+* Supports Unity 5.3 - 6000.3: metadata v16 - v31 (up to 2022.3 and Unity 6000.0 - 6000.2) and v39 (6000.3, tested
+  with 6000.3.13f1). Not supported: v35 / v38, which only 6000.3 alpha editors produced, and v104 and later
+  (Unity 6000.5+)
 * Supports generate IDA, Ghidra and Binary Ninja scripts to help them better analyze il2cpp files
 * Supports generate structures header file
 * Supports Android memory dumped `libil2cpp.so` file to bypass protection

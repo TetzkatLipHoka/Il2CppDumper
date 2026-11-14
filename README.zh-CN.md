@@ -8,7 +8,7 @@ Unity il2cpp逆向工程
 
 * 还原DLL文件（不包含代码），可用于提取`MonoBehaviour`和`MonoScript`
 * 支持ELF, ELF64, Mach-O, PE, NSO和WASM格式
-* 支持Unity 5.3 - 2022.3（metadata v16 - v31）以及 Unity 6000.3（metadata v39）；不支持 metadata v32 - v38
+* 支持Unity 5.3 - 6000.3：metadata v16 - v31 以及 v39；不支持 v35 / v38（仅 6000.3 alpha 版本）和 v104 及以上（Unity 6000.5+）
 * 本分支新增的功能（PS4 / PS5、`NoPELoader`、`ps4tools`）请参阅[英文说明](README.md)
 * 生成IDA和Ghidra的脚本，帮助IDA和Ghidra更好的分析il2cpp文件
 * 生成结构体头文件
