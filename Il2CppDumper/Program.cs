@@ -222,9 +222,13 @@ namespace Il2CppDumper
                 var flag = il2Cpp.PlusSearch(metadata.methodDefs.Count(x => x.methodIndex >= 0), metadata.typeDefs.Length, metadata.imageDefs.Length);
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    if (!flag && il2Cpp is PE)
+                    if (!flag && il2Cpp is PE && config.NoPELoader)
                     {
-                        Console.WriteLine("Use custom PE loader");
+                        Console.WriteLine("Static search failed; the PE loader is disabled (NoPELoader), the file is not loaded.");
+                    }
+                    else if (!flag && il2Cpp is PE)
+                    {
+                        Console.WriteLine("Use custom PE loader (loads the file into this process and runs its startup code; \"NoPELoader\": true in config.json forbids it)");
                         il2Cpp = PELoader.Load(il2cppPath);
                         il2Cpp.SetProperties(version, metadata.metadataUsagesCount);
                         flag = il2Cpp.PlusSearch(metadata.methodDefs.Count(x => x.methodIndex >= 0), metadata.typeDefs.Length, metadata.imageDefs.Length);

@@ -17,5 +17,6 @@
         public double ForceVersion { get; set; } = 24.3;
         public bool ForceDump { get; set; } = false;
         public bool NoRedirectedPointer { get; set; } = false;
+        public bool NoPELoader { get; set; } = false;   // never LoadLibrary the analysed file (it runs the file's startup code)
     }
 }

@@ -104,15 +104,17 @@ namespace Il2CppDumper
             var dataList = new List<SectionHeader>();
             foreach (var section in sections)
             {
-                switch (section.Characteristics)
+                // by the memory flags, not by exact values: protectors (Denuvo: SMT III Nocturne HD) keep code and data in
+                // plain text but scramble names and content bits (.data becomes ".debug" with 0xC0000020), which made the
+                // search miss the data section and fall back to the PE loader. Plain builds classify exactly as before.
+                const uint MemExecute = 0x20000000, MemRead = 0x40000000, MemDiscardable = 0x02000000;
+                if ((section.Characteristics & MemExecute) != 0)
                 {
-                    case 0x60000020:
-                        execList.Add(section);
-                        break;
-                    case 0x40000040:
-                    case 0xC0000040:
-                        dataList.Add(section);
-                        break;
+                    execList.Add(section);
+                }
+                else if ((section.Characteristics & MemRead) != 0 && (section.Characteristics & MemDiscardable) == 0)
+                {
+                    dataList.Add(section);
                 }
             }
             var sectionHelper = new SectionHelper(this, methodCount, typeDefinitionsCount, metadataUsagesCount, imageCount);

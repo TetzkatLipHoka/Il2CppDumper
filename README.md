@@ -117,6 +117,11 @@ Available options:
 
 * `NoRedirectedPointer`
   * Treat pointers in dumped files as unredirected, This option needs to be `true` for files dumped from some devices
+* `NoPELoader`
+  * On Windows the dumper falls back to a "custom PE loader" when the static search finds nothing: it loads the
+    file with `LoadLibrary`, which runs the file's own startup code inside the dumper. `true` forbids that; use it
+    for files you do not trust. Protected files whose code and data are still plain text (Denuvo: sections renamed,
+    `.data` flagged `0xC0000020`) no longer need the loader: sections are classified by their memory flags.
 
 ## Common errors
 
