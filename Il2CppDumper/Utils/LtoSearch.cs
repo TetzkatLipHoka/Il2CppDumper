@@ -55,6 +55,20 @@ namespace Il2CppDumper
             }
             Console.WriteLine("codeGenModules : {0:x} ({1})", codeGenModules, imageCount);
 
+            // Sub-version: there is no CodeRegistration to measure it on, so the module layout decides. 24.5 / 27.1 put
+            // adjustorThunkCount + adjustorThunks in front of invokerIndices; read as 24.4 / 27 every module then shows
+            // a count (never above its method count) where the invokerIndices pointer belongs.
+            if (il2Cpp.Version is 24.4 or 27)
+            {
+                var withMethods = Qwords(codeGenModules, imageCount).Select(p => il2Cpp.MapVATR<Il2CppCodeGenModule>(p)).Where(m => m.methodPointerCount > 0).ToList();
+                if (withMethods.Count > 0 && withMethods.All(m => m.invokerIndices <= (ulong)m.methodPointerCount))
+                {
+                    il2Cpp.Version = il2Cpp.Version == 27 ? 27.1 : 24.5;
+                    Console.WriteLine($"Change il2cpp version to: {il2Cpp.Version}");
+                }
+            }
+            il2Cpp.DetectRgctxVersion(codeGenModules, (ulong)imageCount);
+
             // expected table sizes from the indices that reference them
             var maxMethodIndex = -1;
             var maxInvokerIndex = -1;

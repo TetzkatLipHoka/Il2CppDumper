@@ -127,24 +127,7 @@ namespace Il2CppDumper
                 Console.WriteLine($"Change il2cpp version to: {Version}");
                 pCodeRegistration = MapVATR<Il2CppCodeRegistration>(codeRegistration);
             }
-            if (Version == 27.1)
-            {
-                var pCodeGenModules = MapVATR<ulong>(pCodeRegistration.codeGenModules, pCodeRegistration.codeGenModulesCount);
-                foreach (var pCodeGenModule in pCodeGenModules)
-                {
-                    var codeGenModule = MapVATR<Il2CppCodeGenModule>(pCodeGenModule);
-                    if (codeGenModule.rgctxsCount > 0)
-                    {
-                        var rgctxs = MapVATR<Il2CppRGCTXDefinition>(codeGenModule.rgctxs, codeGenModule.rgctxsCount);
-                        if (rgctxs.All(x => x.data.rgctxDataDummy > limit))
-                        {
-                            Version = 27.2;
-                            Console.WriteLine($"Change il2cpp version to: {Version}");
-                        }
-                        break;
-                    }
-                }
-            }
+            DetectRgctxVersion(pCodeRegistration.codeGenModules, pCodeRegistration.codeGenModulesCount);
             if (Version == 24.4 && pCodeRegistration.invokerPointersCount > limit)
             {
                 Version = 24.5;
@@ -158,6 +141,30 @@ namespace Il2CppDumper
                 pCodeRegistration = MapVATR<Il2CppCodeRegistration>(codeRegistration);
             }
             Init(pCodeRegistration, MapVATR<Il2CppMetadataRegistration>(metadataRegistration));
+        }
+
+        // 27.1 -> 27.2: the rgctx data became a pointer. Also called by LtoSearch, which has no CodeRegistration to go through Init(ulong, ulong)
+        public void DetectRgctxVersion(ulong codeGenModules, ulong codeGenModulesCount)
+        {
+            if (Version != 27.1)
+            {
+                return;
+            }
+            var limit = this is WebAssemblyMemory ? 0x35000u : 0x50000u; //TODO
+            foreach (var pCodeGenModule in MapVATR<ulong>(codeGenModules, codeGenModulesCount))
+            {
+                var codeGenModule = MapVATR<Il2CppCodeGenModule>(pCodeGenModule);
+                if (codeGenModule.rgctxsCount > 0)
+                {
+                    var rgctxs = MapVATR<Il2CppRGCTXDefinition>(codeGenModule.rgctxs, codeGenModule.rgctxsCount);
+                    if (rgctxs.All(x => x.data.rgctxDataDummy > limit))
+                    {
+                        Version = 27.2;
+                        Console.WriteLine($"Change il2cpp version to: {Version}");
+                    }
+                    break;
+                }
+            }
         }
 
         // Entry point for callers that reconstructed the registration structs themselves (see LtoSearch)
