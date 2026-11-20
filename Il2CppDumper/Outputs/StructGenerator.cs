@@ -375,7 +375,11 @@ namespace Il2CppDumper
             var jsonOptions = new JsonSerializerOptions() { WriteIndented = true, IncludeFields = true };
             File.WriteAllText(outputDir + "stringliteral.json", JsonSerializer.Serialize(stringLiterals, jsonOptions), new UTF8Encoding(false));
             //写入文件
-            File.WriteAllText(outputDir + "script.json", JsonSerializer.Serialize(json, ScriptJsonContext.Default.ScriptJson));
+            // straight to the file: as one string a big game (ENDLESS Dungeon, 219 MB) does not fit into a 32-bit process
+            using (var stream = File.Create(outputDir + "script.json"))
+            {
+                JsonSerializer.Serialize(stream, json, ScriptJsonContext.Default.ScriptJson);
+            }
             //il2cpp.h
             for (int i = 0; i < genericClassList.Count; i++)
             {
@@ -429,10 +433,17 @@ namespace Il2CppDumper
                     Console.WriteLine($"WARNING: This il2cpp version [{il2Cpp.Version}] does not support generating .h files");
                     return;
             }
-            sb.Append(headerStruct);
-            sb.Append(arrayClassHeader);
-            sb.Append(methodInfoHeader);
-            File.WriteAllText(outputDir + "il2cpp.h", sb.ToString());
+            // part by part, chunk by chunk: joined into one string a big game (ENDLESS Dungeon, 217 MB) does not fit into a 32-bit process
+            using (var writer = new StreamWriter(outputDir + "il2cpp.h"))
+            {
+                foreach (var part in new[] { sb, headerStruct, arrayClassHeader, methodInfoHeader })
+                {
+                    foreach (var chunk in part.GetChunks())
+                    {
+                        writer.Write(chunk.Span);
+                    }
+                }
+            }
         }
 
         private void AddMetadataUsageTypeInfo(ScriptJson json, uint index, ulong address)
