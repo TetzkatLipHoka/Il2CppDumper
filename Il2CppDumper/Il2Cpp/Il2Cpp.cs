@@ -48,6 +48,15 @@ namespace Il2CppDumper
             this.metadataUsagesCount = metadataUsagesCount;
         }
 
+        // The search returns the struct start of the older layout. Read there, a newer layout (two more pointers in front
+        // of codeGenModules) shows the genericAdjustorThunks pointer as genericMethodPointersCount and the invoker count as
+        // genericMethodPointers. "Count above the limit" alone is not enough: big games have more generic method pointers
+        // than the limit (ENDLESS Dungeon: 0x566EA), but a real count never exceeds the address of its own table.
+        private bool GenericMethodPointersShifted(uint limit)
+        {
+            return pCodeRegistration.genericMethodPointersCount > limit && pCodeRegistration.genericMethodPointersCount > pCodeRegistration.genericMethodPointers;
+        }
+
         protected bool AutoPlusInit(ulong codeRegistration, ulong metadataRegistration)
         {
             if (codeRegistration != 0)
@@ -58,7 +67,7 @@ namespace Il2CppDumper
                     pCodeRegistration = MapVATR<Il2CppCodeRegistration>(codeRegistration);
                     if (Version == 31)
                     {
-                        if (pCodeRegistration.genericMethodPointersCount > limit)
+                        if (GenericMethodPointersShifted(limit))
                         {
                             codeRegistration -= PointerSize * 2;
                         }
@@ -70,7 +79,7 @@ namespace Il2CppDumper
                     }
                     if (Version == 29)
                     {
-                        if (pCodeRegistration.genericMethodPointersCount > limit)
+                        if (GenericMethodPointersShifted(limit))
                         {
                             Version = 29.1;
                             codeRegistration -= PointerSize * 2;
