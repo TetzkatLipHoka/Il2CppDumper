@@ -52,7 +52,7 @@ Decrypted PS4/PS5 `Il2CppUserAssemblies.prx` (ELF `e_type` 0xFE18, no section he
 * `ps4tools/il2cheat.py` writes a TLH trainer from il2live paths: frozen values, `call:` (run a game method once, e.g.
   give an item) and `patch:` (force a method's return value) cheats. `ps4tools/il2items.py` proposes the "give item"
   rules of a game, `ps4tools/gui_il2cpp_dumper.py` (by talixme) is a Tk front end for the whole chain.
-* When LTO folded `Il2CppCodeRegistration` into code (seen in Blasphemous 2 and Soul Hackers 2), it is reconstructed from the
+* When LTO folded `Il2CppCodeRegistration` into code (seen in Blasphemous 2, Soul Hackers 2 and Anger Foot), it is reconstructed from the
   code gen module table, the generic method pointer table and the invoker table (`Utils/LtoSearch.cs`). The il2cpp
   sub-version (24.5, 27.1, 27.2) is then taken from the layout of the code gen modules.
 
