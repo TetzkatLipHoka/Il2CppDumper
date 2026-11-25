@@ -614,6 +614,8 @@ class Resolver:
             cands = self.find_types(name)
             arity = len(split_generic(name)[1])
             fit = [c for c in cands if len(split_generic(c.name)[1]) == arity]      # Context<GameEntity> -> Context<TEntity>, not SimpleCollator.Context
+            base = split_generic(name)[0]
+            fit = [c for c in fit if split_generic(c.name)[0] == base] or fit       # dump.cs writes a nested type as Outer.Inner: a bare Type is System.Type, not the enum Gradient2.Type
             same = [c for c in fit if c.ns == hint_ns]
             t = (same or fit or cands)[0] if cands else None
         self.cache[key] = t
