@@ -9,7 +9,8 @@ Cheat kinds: "Name=path=value" writes the value every frame while on (int/float/
 il2live syntax (Class::static or this. for the hooked object, .field, [i] / [$n] (index from a cell), {key} / {$n}, {Type=X}, :Cast). "Name=call:Path.Method(args)"
 calls the game's method once per switch-on from the hook cave (System V, MethodInfo* = 0; args: numbers, enum members, true/false,
 null, $n = editable cell, a path = object). "Name=patch:Class.Method[(types)]=noop|true|false|<n>" is a TLH Assembly entry at the
-method start (return value forced / method skipped), toggled by the menu, no hook. The call/patch kinds follow ReaperPy's idea. The hook is the first byte of
+method start (return value forced / method skipped), toggled by the menu, no hook. The call/patch kinds follow ReaperPy's idea. call: rules for
+the same method share one block (a stub per rule fills the block's argument cells, --no-share: one block each). The hook is the first byte of
 an Update() method of a game class that has a live instance in the dump (--hook picks the class), the cave resolves
 every path from the static root on every call: no addresses from the dump survive into the trainer except module
 offsets (TypeInfo table, metadata pointer, hook AOB), so it works across sessions and restarts.
@@ -456,14 +457,54 @@ def ret_asm(res, ret, mode, who):
     sys.exit(f"{who}: return type {ret} is an object/struct, not patchable")
 
 
-async def compile_call(res, rt, read, base, k, target, this_info, roots, images, gadget=None):
-    """'Path.Method(args)' or 'Class.Method(args)' (static) -> (asm lines, GetMem lines, RegisterSymbol lines, cheat value entries, text).
+CALL_RE = re.compile(r"^(?P<target>.+?)\((?P<args>.*)\)$")
+
+
+def call_groups(specs):
+    """{spec number: [(spec number, args), ...]} for call: specs that can share one block: same Path.Method and, argument by
+    argument, the same path / null, or a number / enum member / bool / $ cell (may differ from rule to rule). il2items writes
+    one rule per item this way; one block per rule costs about 230 bytes of cave each, a member of a shared block about 35."""
+    by = {}
+    for k, spec in enumerate(specs, 1):
+        rest = spec.split("=", 1)[1] if "=" in spec else ""
+        m = CALL_RE.match(rest[5:]) if rest.startswith("call:") else None
+        if m:
+            args = split_args(m["args"])
+            sig = (m["target"], tuple(x if is_path(x) or x == "null" else "#" for x in args))
+            by.setdefault(sig, []).append((k, args))
+    return {k: ms for ms in by.values() if len(ms) > 1 for k, _ in ms}
+
+
+def const_bits(base_t, pt, text, who):
+    """Raw bits of a constant argument of type base_t (pt: its enum Type or None)."""
+    if base_t == "float":
+        return struct.unpack("<I", struct.pack("<f", float(text)))[0]
+    if base_t == "double":
+        return struct.unpack("<Q", struct.pack("<d", float(text)))[0]
+    if pt is not None:
+        v = int(text, 0) if text.lstrip("-").isdigit() else pt.consts.get(text.split(".")[-1])
+        return v if v is not None else sys.exit(f"{who}: {text} is not a member of {pt.full}: {', '.join(list(pt.consts)[:40])}")
+    return int(text.lower() in ("1", "true")) if base_t == "bool" else int(text, 0)
+
+
+def cell_default(text, pt, who):
+    """Default of a $n / $Member cell."""
+    default = text[1:] or "1"
+    if pt is not None and not default.lstrip("-").isdigit():
+        default = str(pt.consts.get(default.split(".")[-1]) if default.split(".")[-1] in pt.consts else sys.exit(f"{who}: {default} is not a member of {pt.full}"))
+    return default
+
+
+async def compile_call(res, rt, read, base, k, target, this_info, roots, images, gadget=None, gcells=(), flag_set=None):
+    """'Path.Method(args)' or 'Class.Method(args)' (static) -> (asm lines, GetMem lines, RegisterSymbol lines, cheat value entries, text,
+    group cells). gcells: argument positions that are loaded from a hidden cell GVal<k>_<i> (a shared block, the members' stubs
+    fill it; returned as {i: (symbol, base type, enum Type or None, size, TLH type)}), flag_set: the lines that mark the call as done.
     Arguments: numbers, enum members (Weapons.Revolver or Revolver), true/false, null, $n / $Member (editable value cell with default n),
     or a path (Class::... / this....) for an object parameter. System V order (this, args..., MethodInfo* = 0); floats in xmm."""
-    m = re.match(r"^(?P<target>.+?)\((?P<args>.*)\)$", target) or sys.exit(f"{target}: expected Path.Method(args)")
+    m = CALL_RE.match(target) or sys.exit(f"{target}: expected Path.Method(args)")
     obj_path, _, mname = m["target"].rpartition(".")
     args = split_args(m["args"])
-    mems, syms, entries, code, cells = [], [], [], [], []
+    mems, syms, entries, code, cells, ginfo = [], [], [], [], [], {}
     if is_path(obj_path):
         hops, ftype = await compile_path(res, rt, read, base, obj_path, roots, this_info)
         hops.append(("deref",))                                                  # the path names the slot, this = the object in it
@@ -499,21 +540,24 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
                 sys.exit(f"{meth.sig}: too many integer/object parameters for register passing")
             reg = INT_REGS[ints]; ints += 1
         who = f"{meth.sig} argument {i + 1} ({ptype} {pname})"
-        if text.startswith("$"):                                                 # editable cell
+        if text.startswith("$") or i in gcells:                                  # editable cell / cell of a shared block
             if not (isfloat or base_t in INTS):
                 sys.exit(f"{who}: $ cells are for numbers/enums/bools")
             tlh, size, _r, _f = CELL[base_t if base_t in CELL else "int"]
-            default = text[1:] or "1"
-            if enum and not default.lstrip("-").isdigit():
-                default = str(pt.consts.get(default.split(".")[-1]) if default.split(".")[-1] in pt.consts else sys.exit(f"{who}: {default} is not a member of {pt.full}"))
-            mems.append(f"GetMem( Val{k}_{i}, {size} )")
-            entries.append(f"      <Symbol>Val{k}_{i}</Symbol>\n      <Type>Value</Type>\n      <ValueType>{tlh}</ValueType>\n      <Value>{default}</Value>")
-            if isfloat:
-                loads += [f"mov {'rax' if size == 8 else 'eax'}, [Val{k}_{i}]", f"mov{'q' if size == 8 else 'd'} {reg}, {'rax' if size == 8 else 'eax'}"]
-            elif size >= 4:
-                loads.append(f"mov {reg if size == 8 else REG32[reg]}, [Val{k}_{i}]")
+            cell = f"Val{k}_{i}"
+            if i in gcells:
+                cell = f"GVal{k}_{i}"
+                ginfo[i] = (cell, base_t, pt if enum else None, size, tlh)
             else:
-                loads.append(f"movzx {REG32[reg]}, {'byte' if size == 1 else 'word'} ptr [Val{k}_{i}]")
+                default = cell_default(text, pt if enum else None, who)
+                entries.append(f"      <Symbol>Val{k}_{i}</Symbol>\n      <Type>Value</Type>\n      <ValueType>{tlh}</ValueType>\n      <Value>{default}</Value>")
+            mems.append(f"GetMem( {cell}, {size} )")
+            if isfloat:
+                loads += [f"mov {'rax' if size == 8 else 'eax'}, [{cell}]", f"mov{'q' if size == 8 else 'd'} {reg}, {'rax' if size == 8 else 'eax'}"]
+            elif size >= 4:
+                loads.append(f"mov {reg if size == 8 else REG32[reg]}, [{cell}]")
+            else:
+                loads.append(f"movzx {REG32[reg]}, {'byte' if size == 1 else 'word'} ptr [{cell}]")
         elif is_path(text):                                                      # object argument from a path
             if base_t in INTS or isfloat:
                 sys.exit(f"{who}: a path gives an object, the parameter is a {ptype}")
@@ -547,7 +591,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
             sys.exit(f"{who}: {ptype} parameters take a path to an object or null")
     syms.append(f"RegisterSymbol( Call{k}, ModuleBase+{meth.rva:#x} )")
     cm, ce = cell_entries(cells); mems += cm; entries += ce
-    code.append(f"mov byte ptr [Flag{k}], 2")                                   # once per switch-on, only after every path resolved
+    code += flag_set or [f"mov byte ptr [Flag{k}], 2"]                          # once per switch-on, only after every path resolved
     call = ([f"mov rdi, [This{k}]"] if not meth.static else []) + loads + \
            [f"xor {REG32[INT_REGS[ints]]}, {REG32[INT_REGS[ints]]}", f"movabs rax, Call{k}"]   # MethodInfo* = 0 (enough for plain methods)
     if gadget:
@@ -569,7 +613,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
         code += ["push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8"] + call + \
                 ["call rax", "add rsp, 8", "pop r11", "pop r10", "pop rsi", "pop rdi"]
     code += [f"c{k}_{i}_end:" for i in range(len(args))]
-    return code, mems, syms, entries, f"{meth.sig} [{'static' if meth.static else 'this=' + obj_path}] RVA {meth.rva:#x}"
+    return code, mems, syms, entries, f"{meth.sig} [{'static' if meth.static else 'this=' + obj_path}] RVA {meth.rva:#x}", ginfo
 
 
 async def amain(a):
@@ -624,6 +668,7 @@ async def amain(a):
         return
 
     cheats, blocks, mems, syms = [], [], [], []
+    groups, pending = ({} if a.no_share else call_groups(a.specs)), {}
     text, blob = module_text(rt, dump)
     for k, spec in enumerate(a.specs, 1):
         name, rest = spec.split("=", 1)                  # the path itself may contain "=" ({Type=X}, {_guid=...})
@@ -639,8 +684,42 @@ async def amain(a):
             print(f"{name}: {meth.sig} RVA {meth.rva:#x} -> {asm.replace(chr(10), '; ')} (all callers, enemies too)")
             continue
         mems.append(f"GetMem( Flag{k}, 1 )")
+        if k in pending:                                 # later member of a shared call block, compiled with the first
+            cheats.append((name, entries + pending.pop(k), None))
+            continue
+        if k in groups:                                  # several rules for one method (il2items: one per item): one block, a stub per rule
+            ms = groups[k]
+            vary = {i for i, x in enumerate(ms[0][1]) if not is_path(x) and x != "null" and (len({m[1][i] for m in ms}) > 1 or any(m[1][i].startswith("$") for m in ms))}
+            code, cm, cs, ce, text_, ginfo = await compile_call(res, rt, read, rt.base, k, rest[5:], this_info(rest), roots, images, need_gadget(),
+                                                                gcells=vary, flag_set=[f"mov rax, [GFlag{k}]", "mov byte ptr [rax], 2"])
+            mems += cm + [f"GetMem( GFlag{k}, 8 )"]; syms += cs
+            stubs = []
+            for n, (mk, margs) in enumerate(ms):         # stub: this rule is switched on -> its arguments into the block's cells, its flag is the one to mark
+                stubs += [f"cmp byte ptr [Flag{mk}], 1", f"jne c{k}_s{n + 1}" if n + 1 < len(ms) else f"jne c{k}_end"]
+                ment = []
+                for i in sorted(vary):
+                    cell, base_t, pt, size, tlh = ginfo[i]
+                    who = f"{a.specs[mk - 1].split('=', 1)[0]}: argument {i + 1}"
+                    if margs[i].startswith("$"):         # the rule keeps its own editable cell, copied on use
+                        r = {8: "rdx", 4: "edx", 2: "dx", 1: "dl"}[size]
+                        mems.append(f"GetMem( Val{mk}_{i}, {size} )")
+                        ment.append(f"      <Symbol>Val{mk}_{i}</Symbol>\n      <Type>Value</Type>\n      <ValueType>{tlh}</ValueType>\n      <Value>{cell_default(margs[i], pt, who)}</Value>")
+                        stubs += [f"mov {r}, [Val{mk}_{i}]", f"mov [{cell}], {r}"]
+                    else:
+                        bits = const_bits(base_t, pt, margs[i], who)
+                        stubs += [f"movabs rdx, {bits & 0xFFFFFFFFFFFFFFFF:#x}", f"mov [{cell}], rdx"] if size == 8 else \
+                                 [f"mov {('byte', 'word', '', 'dword')[size - 1]} ptr [{cell}], {bits & ((1 << 8 * size) - 1):#x}"]
+                stubs += [f"lea rax, [Flag{mk}]", f"mov [GFlag{k}], rax"] + ([f"jmp c{k}_go", f"c{k}_s{n + 1}:"] if n + 1 < len(ms) else [])
+                if mk == k:
+                    entries += ment
+                else:
+                    pending[mk] = ment
+            blocks.append("\n".join(stubs + [f"c{k}_go:"] + code + [f"c{k}_end:"]))
+            cheats.append((name, entries, None))
+            print(f"{name}: call {text_}, one block for {len(ms)} rules ({', '.join(a.specs[mk - 1].split('=', 1)[0] for mk, _ in ms[1:])})")
+            continue
         if rest.startswith("call:"):                     # Name=call:Path.Method(args): once per switch-on
-            code, cm, cs, ce, text_ = await compile_call(res, rt, read, rt.base, k, rest[5:], this_info(rest), roots, images, need_gadget())
+            code, cm, cs, ce, text_, _g = await compile_call(res, rt, read, rt.base, k, rest[5:], this_info(rest), roots, images, need_gadget())
             blocks.append("\n".join([f"cmp byte ptr [Flag{k}], 1", f"jne c{k}_end"] + code + [f"c{k}_end:"]))
             mems += cm; syms += cs; entries += ce
             cheats.append((name, entries, None))
@@ -717,6 +796,7 @@ if __name__ == "__main__":
     ap.add_argument("--game", help="game name for the TLH header (default: from the output file name)")
     ap.add_argument("--version", default="", help="game version for the TLH header, e.g. 1.00")
     ap.add_argument("--check", help="path: print the generated hops and compare the emulation with il2live")
+    ap.add_argument("--no-share", action="store_true", help="one block per call: rule even when several rules call the same method (bigger cave)")
     a = ap.parse_args()
     if not a.check and not (a.out and a.specs):
         ap.error("out.TLH and at least one spec, or --check path")
