@@ -460,6 +460,23 @@ def ret_asm(res, ret, mode, who):
     sys.exit(f"{who}: return type {ret} is an object/struct, not patchable")
 
 
+def hook_floats(res, t, name, rva):
+    """How many float / double parameters the hooked method takes (they arrive in xmm0.. and must survive a call cheat)."""
+    for c in res.chain(t):
+        for m in c.sigs.get(name.rsplit(".", 1)[-1], []):
+            if m.rva == rva:
+                return min(8, sum(pt in ("float", "double") for pt, _ in m.args))
+    return 0
+
+
+def xmm_keep(asm, n):
+    """Expand the @XMM_SAVE / @XMM_LOAD lines of the call blocks for a hooked method with n float parameters (0: drop them)."""
+    size = 8 * (n + (n & 1))                                 # even count: the stack alignment at the call stays
+    save = "".join([f"sub rsp, {size:#x}\n"] + [f"movq qword ptr [rsp+{8 * i:#x}], xmm{i}\n" for i in range(n)]) if n else ""
+    load = "".join([f"movq xmm{i}, qword ptr [rsp+{8 * i:#x}]\n" for i in range(n)] + [f"add rsp, {size:#x}\n"]) if n else ""
+    return asm.replace("@XMM_SAVE\n", save).replace("@XMM_LOAD\n", load)
+
+
 CALL_RE = re.compile(r"^(?P<target>.+?)\((?P<args>.*)\)$")
 
 
@@ -603,18 +620,21 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
         # like the gadget function's (push rbp; mov rbp, rsp; push regs) is built with the hooked method's return address
         # above it, and the method returns into `pop rbp; ret` of that function: unwinding passes that row to the hooked
         # method's caller (il2cpp's catch logs the exception), a normal return pops our continuation and the cave goes on.
+        # The hooked method has not run yet: its arguments (rdi, rsi, rcx, rdx, r8, r9 and, for a Tick(float dt), xmm0..) are
+        # kept across the call; found by il2emu, a call cheat used to hand the called method's leftovers to the hooked one.
         regs = gadget[1]
         pad = ["sub rsp, 8"] if len(regs) % 2 else []                           # callee entry rsp = 8 mod 16
         mems.append(f"GetMem( InCall{k}, 1 )")
         code += ["pop r9", "pop r8", "pop rdx", "pop rcx", "pop rax", "popfq", "push rbp", "mov rbp, rsp"] + [f"push {r}" for r in regs] + \
-                ["push rdi", "push rsi"] + pad + [f"mov byte ptr [InCall{k}], 0",    # also left at 1 by a call that threw
+                ["push rdi", "push rsi", "push rcx", "push rdx", "push r8", "push r9", "@XMM_SAVE"] + pad + [f"mov byte ptr [InCall{k}], 0",    # also left at 1 by a call that threw
                  f"call c{k}_pc", f"c{k}_pc:", f"cmp byte ptr [InCall{k}], 1", f"je c{k}_back",
                  f"mov byte ptr [InCall{k}], 1", "push qword ptr [rbp]"] + call + ["movabs r10, Gadget", "push r10", "jmp rax",
-                 f"c{k}_back:", f"mov byte ptr [InCall{k}], 0"] + (["add rsp, 8"] if pad else []) + ["pop rsi", "pop rdi"] + \
+                 f"c{k}_back:", f"mov byte ptr [InCall{k}], 0"] + (["add rsp, 8"] if pad else []) + \
+                ["@XMM_LOAD", "pop r9", "pop r8", "pop rdx", "pop rcx", "pop rsi", "pop rdi"] + \
                 ([f"add rsp, {8 * len(regs):#x}"] if regs else []) + ["pop rbp", "pushfq", "push rax", "push rcx", "push rdx", "push r8", "push r9"]
     else:                                                                       # no unwind info found: plain call, a throwing method ends the process
-        code += ["push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8"] + call + \
-                ["call rax", "add rsp, 8", "pop r11", "pop r10", "pop rsi", "pop rdi"]
+        code += ["push rdi", "push rsi", "push r10", "push r11", "sub rsp, 8", "@XMM_SAVE"] + call + \
+                ["call rax", "@XMM_LOAD", "add rsp, 8", "pop r11", "pop r10", "pop rsi", "pop rdi"]
     code += [f"c{k}_{i}_end:" for i in range(len(args))]
     return code, mems, syms, entries, f"{meth.sig} [{'static' if meth.static else 'this=' + obj_path}] RVA {meth.rva:#x}", ginfo
 
@@ -695,7 +715,9 @@ async def live_call(a, dump, rt, res, script):
     try:
         far = abs(cave - base) >= 2**31 - len(blob_text) - 4096
         need, n = (14 if far else 5), 0
-        name, rva = pick_hook(rt, res, dump, script, a.hook, images, roots, need)[:2]    # a method whose first `need` bytes can be moved
+        name, rva, _p, _s, _n, ht = pick_hook(rt, res, dump, script, a.hook, images, roots, need)   # a method whose first `need` bytes can be moved
+        floats = hook_floats(res, ht, name, rva)
+        code = xmm_keep("\n".join(code) + "\n", floats).splitlines()
         hook_va = base + rva
         head = await read(hook_va, 32)
         if head[:16] != bytes(blob_text[rva:rva + 16]):
@@ -714,10 +736,19 @@ async def live_call(a, dump, rt, res, script):
         print(f"call {text_}")
         print(f"hook: {name} at {a.module}+{rva:#x} ({n} bytes moved, {'far' if far else 'near'} jump), cave {len(blob)} bytes at {cave:#x}"
               + ("" if gadget else "; no unwind info in the module: a throwing method ends the game"))
-        if not dbg:
-            print("dry run (no --host): nothing sent. First instructions of the cave:")
-            for ins in list(capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64).disasm(blob, cave))[:12]:
-                print(f"  {ins.address:#x}  {ins.mnemonic} {ins.op_str}")
+        if not dbg:                                          # dry run: execute the cave against the dump when unicorn is there
+            try:
+                import il2emu
+                target = next(base + int(x.split("+")[1].split(" ")[0], 16) for x in syms if x.startswith("RegisterSymbol( Call1,"))
+                emu = il2emu.Emu(dump, own=[(cave, cave + len(blob))], stubs={target})
+                emu.load(cave, blob)
+                before, after, err = emu.run(cave, cave + lab["Back"] - 6 - n, xmm=floats)     # up to the moved instructions
+                did = il2emu.show(dump, emu, base, a.module, {})
+                flag = emu.uc.mem_read(cave + lab["Flag1"], 1)[0]
+                print("dry run (no --host), cave executed against the dump: " + ("FAULT: " + err if err else "; ".join(did) or "the path does not resolve in the dump")
+                      + f"; flag {flag}" + (" (returned)" if flag == 3 else "") + ("" if before == after or err else "; REGISTERS / STACK NOT RESTORED"))
+            except ImportError:
+                print("dry run (no --host): nothing sent, cave assembled (pip install unicorn to have it executed against the dump)")
             return
         await dbg.write_memory(pid, cave, blob)
         flag = hits = 0
@@ -904,6 +935,7 @@ async def amain(a):
         syms = [f"RegisterSymbol( TypeInfoTable, ModuleBase+{rt.table_off:#x} )", f"RegisterSymbol( MetadataPtr, ModuleBase+{rt.meta_off:#x} )"] + syms
         asm = "\n".join(mems + syms + ["", "pushfq", "push rax", "push rcx", "push rdx", "push r8", "push r9", ""]
                         + blocks + ["", "done:", "pop r9", "pop r8", "pop rdx", "pop rcx", "pop rax", "popfq"] + site)
+        asm = xmm_keep(asm, hook_floats(res, _t, hook_name, rva))
         aob_s = "-".join(f"{b:02X}" for b in aob)
         xml += [f'  <StartUP Name="IL2CPP hook ({xml_escape(hook_name)})" Description="static roots via the il2cpp TypeInfo table, resolved every frame">',
                 '    <Entry>', *sec, f'      <AOB>{aob_s}</AOB>', '      <Type>Injection</Type>', f'      <Assembly>{xml_escape(asm)}</Assembly>', '    </Entry>', '  </StartUP>']
