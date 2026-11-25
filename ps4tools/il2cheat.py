@@ -37,7 +37,21 @@ CELL = dict(float=("Single", 4, "edx", "<f"), double=("Double", 8, "rdx", "<d"),
 # ---- path -> hops ---------------------------------------------------------------------------------------------------
 # hop kinds: ("root", Type, static offset, field type, parent hops) | ("deref",) | ("add", off) | ("index", i, elemsize, is_list)
 #            | ("key_int", value) | ("key_type", TypeDefIndex, name) | ("key_class", TypeDefIndex, name) | ("key_nth", n, key text)
+#            | ("klass", TypeDefIndex, name): rax is an object, its class must be that class or derive from it
 #            the final slot is the value
+async def guard(res, rt, read, base, hops, owner, decl, this_obj):
+    """Class check after the deref that ends `hops`: the object in the slot was of a subclass in the dump and the member
+    used next exists only from `owner` on (slot declared Health, dump holds SaonaCharacterHealth, field of the latter).
+    Another subclass in that slot at runtime would be written at the wrong offset, so the cheat block is skipped then.
+    No check when the declared type already has the member, or for a generic owner (its instantiations are separate
+    classes, the TypeInfo table only holds the definition)."""
+    if "<" in owner.name or (decl is not None and any(c is owner for c in res.chain(decl))):
+        return
+    hops.append(("klass", owner.idx, owner.full))
+    if await emulate(rt, read, base, hops, this_obj) is None:       # base classes are resolved by name: rather no check than a wrong one
+        hops.pop()
+        print(f"  no class check for {owner.full}: the object in the dump does not derive from it by its parent chain")
+
 async def compile_path(res, rt, read, base, path, classes=None, this=None):
     """Path -> hops. Object classes behind pointers are read from the dump (auto downcast like il2live), string/_guid
     dictionary keys are resolved to their entry index in the dump. this = (Type, dump address) of the hooked object for
@@ -50,18 +64,19 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
         if this is None:
             sys.exit(f"{path}: a this. path needs the hook class (--hook Class, or a static-rooted cheat before it so the hook is chosen first)")
         t, _ = this
-        hops, ftype, cur_t, first = [("this", t)], t.full, t, True
+        hops, ftype, cur_t, first, fns = [("this", t)], t.full, t, True, t.ns
     else:
         _, cls_name, sname = segs[0]
         t = res.find_type(cls_name) or sys.exit(f"class {cls_name} not in dump.cs")
         hit = res.static_field(t, sname) or sys.exit(f"{t.full} has no static field {sname}")
-        hops, ftype, cur_t = [("root", t, hit[1], hit[2], hit[0])], hit[2], None
+        hops, ftype, cur_t, fns = [("root", t, hit[1], hit[2], hit[0])], hit[2], None, hit[3].ns    # fns: namespace the type name ftype was written in
     for op, arg in segs[1:]:
         if op == "cast":
             cur_t = res.find_type(arg) or sys.exit(f"class {arg} not found"); continue
         base_name, gargs = split_generic(ftype)
         if op == "field":
             inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype, cur_t.ns)) and ct.kind == "struct" and not ftype.endswith("[]")
+            derefed = False
             if first:
                 first = False                           # rax already is the object
             elif inline:
@@ -69,13 +84,18 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
             else:
                 hops.append(("deref",))
                 obj = await emulate(rt, read, base, hops, this and this[1])
-                cur_t = (await rt.object_type_live(read, obj) if obj else None) or res.find_type(ftype, cur_t.ns if cur_t else "")
+                decl = res.find_type(ftype, fns)
+                cur_t = (await rt.object_type_live(read, obj) if obj else None) or decl
                 if cur_t is None:
                     sys.exit(f"unknown class for field type {ftype}")
                 if classes is not None:
                     classes.add(cur_t.full)                 # objects on the way (Hero, AgentStats): their Update() surely runs while the value exists
+                derefed = True
             f = res.field(cur_t, arg) or sys.exit(f"{cur_t.full} has no field {arg}")
             off, ft, owner = f
+            if derefed:
+                await guard(res, rt, read, base, hops, owner, decl, this and this[1])
+            fns = owner.ns
             ftype = res.subst(ftype, owner, ft)
             if off:
                 hops.append(("add", off))
@@ -152,6 +172,11 @@ def asm_hops(rt, hops, fail, cells=None):
             code += ["mov rax, [rax]", "test rax, rax", f"jz {fail}"]
         elif k == "add":
             code.append(f"add rax, {h[1]:#x}")
+        elif k == "klass":                                   # object's class or one of its parents == TypeInfoTable[idx], else skip the cheat
+            lbl = fail.replace("_end", "") + f"_c{len(code)}"
+            code += ["movabs r8, TypeInfoTable", "mov r8, [r8]", "test r8, r8", f"jz {fail}", f"mov r8, [r8+{8 * h[1]:#x}]",
+                     "mov r9, [rax]", f"{lbl}_loop:", "test r9, r9", f"jz {fail}", "cmp r9, r8", f"je {lbl}_ok",
+                     f"mov r9, [r9+{KLASS_PARENT:#x}]", f"jmp {lbl}_loop", f"{lbl}_ok:"]
         elif k == "index":
             i, es, is_list = h[1], h[2], h[3]
             code += [f"cmp dword ptr [rax+0x18], {i}", f"jle {fail}"]                                 # _size / max_length
@@ -236,6 +261,15 @@ async def emulate(rt, read, base, hops, this_obj=None):
                 return None
         elif k == "add":
             a += h[1]
+        elif k == "klass":
+            want = await il2live.read_u64(read, await il2live.read_u64(read, base + rt.table_off) + 8 * h[1])
+            kl = await il2live.read_u64(read, a)
+            for _ in range(64):
+                if not kl or kl == want:
+                    break
+                kl = await il2live.read_u64(read, kl + KLASS_PARENT)
+            if not want or kl != want:
+                return None
         elif k == "index":
             i, es, is_list = h[1], h[2], h[3]
             if struct.unpack("<i", await il2live.read_(read, a + 0x18, 4))[0] <= i:
@@ -434,10 +468,12 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
         hops, ftype = await compile_path(res, rt, read, base, obj_path, roots, this_info)
         hops.append(("deref",))                                                  # the path names the slot, this = the object in it
         obj = await emulate(rt, read, base, hops, this_info and this_info[1])
-        t = (rt.object_type(obj) if obj else None) or res.find_type(ftype) or sys.exit(f"{obj_path}: unknown class {ftype}")
+        decl = res.find_type(ftype)
+        t = (rt.object_type(obj) if obj else None) or decl or sys.exit(f"{obj_path}: unknown class {ftype}")
         meth = res.method(t, mname, len(args))
         if meth.static:
             sys.exit(f"{meth.sig} is static, call it as {t.name}.{mname}(...)")
+        await guard(res, rt, read, base, hops, meth.cls, decl, this_info and this_info[1])    # this must be of the method's class
         mems.append(f"GetMem( This{k}, 8 )")
         code += asm_hops(rt, hops, f"c{k}_end", cells) + [f"mov [This{k}], rax"]
         if hops[0][0] == "root":
