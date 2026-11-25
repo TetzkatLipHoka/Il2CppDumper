@@ -62,7 +62,7 @@ def classify(res, m):
     for i, (pt, pn) in enumerate(args):
         if "ref " in pt or "out " in pt:
             return f"parameter {pn} is ref/out"
-        et = res.find_type(pt, m.cls)
+        et = res.find_type(pt)
         if et and et.kind == "enum" and (id_i is None or ITEM_ENUM.search(pt)):
             id_i = i
     if id_i is None:
@@ -70,7 +70,7 @@ def classify(res, m):
             if pt in INTS and ID_PARAM.search(pn) and not COUNT_PARAM.search(pn):
                 id_i = i; break
     if id_i is None:
-        objs = [f"{pt} {pn}" for pt, pn in args if pt not in PRIM and not (res.find_type(pt, m.cls) or il2live.Type("x", "", "", [], 0)).kind == "enum"]
+        objs = [f"{pt} {pn}" for pt, pn in args if pt not in PRIM and not (res.find_type(pt) or il2live.Type("x", "", "", [], 0)).kind == "enum"]
         return f"no enum/int item id parameter ({', '.join(objs) or 'no parameters'})"
     for i, (pt, pn) in enumerate(args):
         if i != id_i and pt in INTS + ("float", "double") and COUNT_PARAM.search(pn):
@@ -78,9 +78,9 @@ def classify(res, m):
     if cnt_i is None:
         cnt_i = next((i for i, (pt, pn) in enumerate(args) if i != id_i and pt == "int"), None)
     for i, (pt, pn) in enumerate(args):
-        if i not in (id_i, cnt_i) and pt not in PRIM and not (res.find_type(pt, m.cls) or il2live.Type("x", "", "", [], 0)).kind == "enum":
+        if i not in (id_i, cnt_i) and pt not in PRIM and not (res.find_type(pt) or il2live.Type("x", "", "", [], 0)).kind == "enum":
             return f"parameter {pn} is a {pt} object"
-    et = res.find_type(args[id_i][0], m.cls)
+    et = res.find_type(args[id_i][0])
     return id_i, cnt_i, et if et and et.kind == "enum" else None
 
 
@@ -245,12 +245,12 @@ async def amain(a):
     # such objects in the static tree, element picked by an editable cell -> one rule gives any item of the game
     done = []
     for m, why in rejected[:12]:
-        objs = [(i, pt) for i, (pt, pn) in enumerate(m.args) if pt not in PRIM and pt not in INTS and (ot := res.find_type(pt, m.cls)) and ot.kind == "class"]
+        objs = [(i, pt) for i, (pt, pn) in enumerate(m.args) if pt not in PRIM and pt not in INTS and (ot := res.find_type(pt)) and ot.kind == "class"]
         if not objs:
             continue
         colls = {}
         for i, pt in objs:
-            c = await collection_path(res, rt, read, rt.base, res.find_type(pt, m.cls))
+            c = await collection_path(res, rt, read, rt.base, res.find_type(pt))
             if c:
                 colls[i] = c
         if len(colls) != len(objs):
@@ -260,7 +260,7 @@ async def amain(a):
             continue
         vals = []
         for i, (pt, pn) in enumerate(m.args):
-            et = res.find_type(pt, m.cls)
+            et = res.find_type(pt)
             vals.append(colls[i][0] if i in colls else f"${a.amount}" if pt in INTS and COUNT_PARAM.search(pn) else "0" if pt in PRIM or pt in INTS
                         else f"${next(iter(real_values(et)), ('0', 0))[0]}" if et and et.kind == "enum" else "null")
         print(f"\n# {m.sig} RVA {m.rva:#x} [{r[1]}], " + ", ".join(f"{m.args[i][0]} {m.args[i][1]} = element of {p} ({n} in the dump, 0..{n - 1})" for i, (p, n) in colls.items()))
@@ -272,7 +272,7 @@ async def amain(a):
         for m, why in rejected[:12]:
             vals = []
             for pt, pn in m.args:
-                et = res.find_type(pt, m.cls)
+                et = res.find_type(pt)
                 vals.append(f"<{pt}.Member>" if et and et.kind == "enum" else "$1" if pt in PRIM else f"<path to {pt}>")
             this = f"{m.cls.name}." if m.static else f"<path to {m.cls.name}>."
             print(f'#   {m.sig}: {why}  ->  "Name=call:{this}{m.name}({", ".join(vals)})"')

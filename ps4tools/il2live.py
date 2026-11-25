@@ -623,13 +623,14 @@ class Resolver:
                 seen.add(id(t)); out.append(t)
         return sorted(out, key=lambda t: len(split_generic(t.name)[1]) != len(args))
 
-    def find_type(self, name, user=None):
+    def find_type(self, name):
         """Type for a (short or full) name. dump.cs writes names without namespace, so when several types carry the name,
-        `user` (the Type whose field / parameter / base is declared with it) decides: its namespace, its assembly, the
-        longest common namespace, then UnityEngine. Measured against the C signatures in script.json on two games: 91% / 96%
-        of the ambiguous parameters right (first type in the dump: 52% / 49%); the rest needs the usings (Event in a game
-        class: AK.Wwise.Event or UnityEngine.Event)."""
-        user = getattr(name, "user", None) or user      # a TypeName knows the class that wrote it
+        the class that wrote it decides (TypeName.user: the Type whose field / parameter / base is declared with it): its
+        namespace, its assembly, the longest common namespace, then UnityEngine. Measured against the C signatures in
+        script.json on two games: 91% / 96% of the ambiguous parameters right (first type in the dump: 52% / 49%); the rest
+        needs the usings (Event in a game class: AK.Wwise.Event or UnityEngine.Event). A plain str has no such class:
+        TypeName(name, cls) gives it one."""
+        user = getattr(name, "user", None)
         if name == "object":
             name = "System.Object"                      # the keyword, not a class that happens to be named object (ak.wwise.core.object)
         key = (name, id(user))
@@ -664,7 +665,7 @@ class Resolver:
         while t is not None and id(t) not in seen and len(seen) < 64:
             seen.add(id(t))
             yield t
-            t = self.find_type(t.bases[0], t) if t.bases and t.bases[0] else None
+            t = self.find_type(t.bases[0]) if t.bases and t.bases[0] else None
 
     def static_field(self, t, name):
         """(parent hops, offset, type string, owner Type) of a static field of t or of a base class: hops = how many
@@ -813,7 +814,7 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None, this_obj
         # dereference the value at addr to get the object we are about to enter
         if op in ("field", "index", "key"):
             base, gargs = split_generic(ftype)
-            is_struct_inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype, cur_t)) and ct.kind == "struct" and not ftype.endswith("[]")
+            is_struct_inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype)) and ct.kind == "struct" and not ftype.endswith("[]")
             if root is not None:
                 obj, cur_t, root = root, cur_t or t, None   # the root object itself: no pointer hop
             elif op == "field" and is_struct_inline:
@@ -823,7 +824,7 @@ async def follow(res, rt, read, base, path, auto_cast=True, trace=None, this_obj
                 if not obj:
                     return None, f"null at {addr:#x}"
                 if op == "field":
-                    cur_t = (await rt.object_type_live(read, obj) if auto_cast else None) or res.find_type(ftype, cur_t)
+                    cur_t = (await rt.object_type_live(read, obj) if auto_cast else None) or res.find_type(ftype)
                     if cur_t is None:
                         sys.exit(f"unknown class for field type {ftype}")
             if op == "field":

@@ -66,18 +66,18 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
         if this is None:
             sys.exit(f"{path}: a this. path needs the hook class (--hook Class, or a static-rooted cheat before it so the hook is chosen first)")
         t, _ = this
-        hops, ftype, cur_t, first, fns = [("this", t)], t.full, t, True, t
+        hops, ftype, cur_t, first = [("this", t)], t.full, t, True
     else:
         _, cls_name, sname = segs[0]
         t = res.find_type(cls_name) or sys.exit(f"class {cls_name} not in dump.cs")
         hit = res.static_field(t, sname) or sys.exit(f"{t.full} has no static field {sname}")
-        hops, ftype, cur_t, fns = [("root", t, hit[1], hit[2], hit[0])], hit[2], None, hit[3]    # fns: class the type name ftype was written in
+        hops, ftype, cur_t = [("root", t, hit[1], hit[2], hit[0])], hit[2], None
     for op, arg in segs[1:]:
         if op == "cast":
             cur_t = res.find_type(arg) or sys.exit(f"class {arg} not found"); continue
         base_name, gargs = split_generic(ftype)
         if op == "field":
-            inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype, cur_t)) and ct.kind == "struct" and not ftype.endswith("[]")
+            inline = cur_t is not None and ftype not in PRIM and (ct := res.find_type(ftype)) and ct.kind == "struct" and not ftype.endswith("[]")
             derefed = False
             if first:
                 first = False                           # rax already is the object
@@ -86,7 +86,7 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
             else:
                 hops.append(("deref",))
                 obj = await emulate(rt, read, base, hops, this and this[1])
-                decl = res.find_type(ftype, fns)
+                decl = res.find_type(ftype)
                 cur_t = (await rt.object_type_live(read, obj) if obj else None) or decl
                 if cur_t is None:
                     sys.exit(f"unknown class for field type {ftype}")
@@ -97,7 +97,6 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
             off, ft, owner = f
             if derefed:
                 await guard(res, rt, read, base, hops, owner, decl, this and this[1])
-            fns = owner
             ftype = res.subst(ftype, owner, ft)
             if off:
                 hops.append(("add", off))
@@ -549,7 +548,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
         sys.exit(f"{meth.sig}: {len(params)} parameters, {len(args)} arguments given")
     ints, floats, loads = (0 if meth.static else 1), 0, []
     for i, ((ptype, pname), text) in enumerate(zip(params, args)):
-        pt = res.find_type(ptype, meth.cls)
+        pt = res.find_type(ptype)
         enum = bool(pt and pt.kind == "enum")
         base_t = pt.enum_base if enum else ptype
         isfloat = base_t in ("float", "double")
