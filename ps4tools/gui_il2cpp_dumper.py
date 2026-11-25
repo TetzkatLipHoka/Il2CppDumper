@@ -1,4 +1,4 @@
-"""Tk front end for ps4dump.py, il2mem.py, il2live.py, il2cheat.py, il2diff.py and il2items.py (Unity IL2CPP). By talixme, beta.
+"""Tk front end for ps4dump.py, il2mem.py, il2live.py, il2cheat.py, il2emu.py, il2diff.py and il2items.py (Unity IL2CPP). By talixme, beta.
     python gui_il2cpp_dumper.py
 """
 import json
@@ -403,7 +403,7 @@ ITEMS_TR = {
         "warn_dump": "Load a game session folder with its SDK (sdk\\dump.cs) first.", "warn_select": "Select at least one row first.",
         "msg_added": "{n} rule(s) added to the cheat list (section 2).", "msg_nohint": "That method has no ready spec (not static / not void / unsupported return): write it by hand, see the README.",
         "msg_enums": "item enums: {e}", "msg_none": "Nothing found.", "msg_error": "Error",
-        "msg_note": "call: / patch: rules are not tested with the check mark: they run from the trainer (try them on the console with a save you can lose).",
+        "msg_note": "The check mark runs a call: rule once on the console (il2cheat --call; use a save you can lose, switch a trainer's master code off first). patch: rules only run from the trainer.",
         "msg_template": "template - edit the <path to ...> parts",
         "tab_enum": "Call per enum member", "lbl_call": "Method to call (path.Method):", "lbl_etype": "Enum:", "lbl_args": "Arguments (* = the member):", "btn_members": "📃 List members",
         "msg_enum_hint": "For methods il2items does not propose (TryUnlockingWeapon, Unlock...): the object path + method, the enum of the item/weapon and the arguments; * is replaced by Enum.Member. Example: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
@@ -419,7 +419,7 @@ ITEMS_TR = {
         "warn_dump": "Carga primero una carpeta de sesión con su SDK (sdk\\dump.cs).", "warn_select": "Selecciona al menos una fila.",
         "msg_added": "{n} regla(s) añadida(s) a la lista de cheats (sección 2).", "msg_nohint": "Ese método no tiene spec lista (no es estático / no es void / retorno no soportado): escríbela a mano, mira el README.",
         "msg_enums": "enums de items: {e}", "msg_none": "No se encontró nada.", "msg_error": "Error",
-        "msg_note": "Las reglas call: / patch: no se prueban con el check: se ejecutan desde el trainer (pruébalas en la consola con una partida que puedas perder).",
+        "msg_note": "El check ejecuta una regla call: una vez en la consola (il2cheat --call; usa una partida que puedas perder y apaga antes el master code de un trainer). Las reglas patch: solo se ejecutan desde el trainer.",
         "msg_template": "plantilla - edita las partes <path to ...>",
         "tab_enum": "Llamar por miembro de enum", "lbl_call": "Método a llamar (ruta.Método):", "lbl_etype": "Enum:", "lbl_args": "Argumentos (* = el miembro):", "btn_members": "📃 Listar miembros",
         "msg_enum_hint": "Para métodos que il2items no propone (TryUnlockingWeapon, Unlock...): la ruta al objeto + método, el enum del item/arma y los argumentos; * se sustituye por Enum.Miembro. Ejemplo: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
@@ -435,7 +435,7 @@ ITEMS_TR = {
         "warn_dump": "Zuerst einen Session-Ordner mit SDK (sdk\\dump.cs) laden.", "warn_select": "Mindestens eine Zeile wählen.",
         "msg_added": "{n} Regel(n) zur Cheat-Liste hinzugefügt (Abschnitt 2).", "msg_nohint": "Für diese Methode gibt es keine fertige Spec: von Hand schreiben, siehe README.",
         "msg_enums": "Item-Enums: {e}", "msg_none": "Nichts gefunden.", "msg_error": "Fehler",
-        "msg_note": "call: / patch:-Regeln werden nicht mit dem Haken getestet: sie laufen im Trainer (auf der Konsole mit einem verlierbaren Spielstand testen).",
+        "msg_note": "Der Haken führt eine call:-Regel einmal auf der Konsole aus (il2cheat --call; verlierbaren Spielstand nehmen, Master Code eines Trainers vorher ausschalten). patch:-Regeln laufen nur im Trainer.",
         "msg_template": "Vorlage - die <path to ...>-Teile ersetzen",
         "tab_enum": "Aufruf pro Enum-Member", "lbl_call": "Methode (Pfad.Methode):", "lbl_etype": "Enum:", "lbl_args": "Argumente (* = das Member):", "btn_members": "📃 Member auflisten",
         "msg_enum_hint": "Für Methoden, die il2items nicht vorschlägt (TryUnlockingWeapon, Unlock...): Objektpfad + Methode, das Enum des Items/der Waffe und die Argumente; * wird durch Enum.Member ersetzt. Beispiel: PlayerData::instance.inventory.TryUnlockingWeapon  /  Weapons  /  *, true",
@@ -2372,9 +2372,10 @@ class IL2CppDumperGUI:
 
     def run_single_test_rule(self, entry_path_widget, entry_val_widget):
         t = TRANSLATIONS[self.current_lang]
-        if entry_path_widget.get().strip().startswith(("call:", "patch:", "hook:")):
+        if entry_path_widget.get().strip().startswith(("patch:", "hook:")):
             messagebox.showinfo("Test", self.itr("msg_note"), parent=self.root)
             return
+        is_call = entry_path_widget.get().strip().startswith("call:")      # run once on the game's own thread (il2cheat --call)
         messagebox.showwarning(t["live_warn_title"], t["live_warn_msg"], parent=self.root)
 
         ip = self.entry_ip.get().strip()
@@ -2389,15 +2390,20 @@ class IL2CppDumperGUI:
 
         p = entry_path_widget.get().strip()
         v = entry_val_widget.get().strip()
-        if not p or not v:
+        if not p or (not v and not is_call):
             return
 
         abs_dump_dir = os.path.abspath(os.path.join(TOOLS_DIR, dump_path))
-        script_path = os.path.join(TOOLS_DIR, "il2live.py")
+        script_path = os.path.join(TOOLS_DIR, "il2cheat.py" if is_call else "il2live.py")
+        hooks = [item['path'].get().strip()[5:].strip() for item in self.cheat_rows if item['path'].get().strip().startswith("hook:")]
 
         def single_thread():
-            self.log(f"\n[SINGLE TEST] il2live.py -> {p} = {v}")
-            args = [script_path, abs_dump_dir, p, "--host", ip, "--set", v]
+            if is_call:
+                self.log(f"\n[SINGLE CALL] il2cheat.py --call {p[5:]}")
+                args = [script_path, abs_dump_dir, "--host", ip, "--call", p[5:]] + (["--hook", hooks[-1]] if hooks and hooks[-1] else [])
+            else:
+                self.log(f"\n[SINGLE TEST] il2live.py -> {p} = {v}")
+                args = [script_path, abs_dump_dir, p, "--host", ip, "--set", v]
             try:
                 res = subprocess.run([sys.executable, "-u"] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=TOOLS_DIR)
                 if res.stdout:
@@ -3160,7 +3166,10 @@ class IL2CppDumperGUI:
         if not save_path:
             return
 
-        target_tlh_path = os.path.relpath(save_path, TOOLS_DIR)
+        try:
+            target_tlh_path = os.path.relpath(save_path, TOOLS_DIR)
+        except ValueError:                                      # another drive than the tools folder: no relative path exists
+            target_tlh_path = save_path
         self.save_config()
 
         script_path = os.path.join(TOOLS_DIR, "il2cheat.py")
@@ -3187,6 +3196,19 @@ class IL2CppDumperGUI:
                 if success:
                     abs_tlh_path = os.path.abspath(os.path.join(TOOLS_DIR, target_tlh_path))
                     if os.path.exists(abs_tlh_path):
+                        try:                                    # offline check: every cheat run once in a CPU emulator against the dump
+                            emu = subprocess.run([sys.executable, "-u", os.path.join(TOOLS_DIR, "il2emu.py"), abs_dump_dir, abs_tlh_path],
+                                                 capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=TOOLS_DIR, env=env)
+                            if "No module named" in emu.stderr:
+                                self.events.put(("log", "[CHECK] skipped: pip install keystone-engine unicorn to have every new trainer run in the emulator against the dump"))
+                            else:
+                                self.events.put(("log", "[CHECK] il2emu.py: each cheat run once against the dump (writes / calls, nothing is sent to the console):"))
+                                for line in (emu.stdout.rstrip() or emu.stderr.strip()).splitlines():
+                                    self.events.put(("log", "[CHECK] " + line))
+                                if emu.returncode:
+                                    self.events.put(("log", "[CHECK] WARNING: a cheat faulted or did not restore the registers, see the lines above"))
+                        except Exception as ex:
+                            self.events.put(("log", f"[CHECK] il2emu.py could not be run: {ex}"))
                         try:
                             with open(abs_tlh_path, "r", encoding="utf-8", errors="ignore") as f:
                                 content = f.read()
