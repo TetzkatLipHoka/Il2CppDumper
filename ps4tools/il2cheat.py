@@ -3,6 +3,7 @@
     python il2cheat.py <dumpdir> out.TLH "Mana=GameStateManager::_instance._mainCharacterEntity.componentCache{611004928}.manas[0]._currentManaStatObject.baseValue=999" ...
     python il2cheat.py <dumpdir> out.TLH --hook PlayerLifeBar "Name=path=value" ...
     python il2cheat.py <dumpdir> --check "path"           # emulate the generated hops against the dump, compare with il2live
+    python il2cheat.py <dumpdir> --host 192.168.0.10 --call "Class::field.Method(args)"   # one call now, on the game's own thread
     python il2cheat.py <dumpdir> out.TLH --hook Player "Health=this.health.health=999"         "Ammo=call:PlayerData::instance.inventory.AddAmmo(PlayerData::instance.inventory.ownedAmmo[1], $5)"         "Slow=call:UnityEngine.Time.set_timeScale(0.3)" "No damage=patch:PlayerHealth.GetDamage=noop"
 
 Cheat kinds: "Name=path=value" writes the value every frame while on (int/float/bool/byte/short/long/enum fields); the path is
@@ -349,7 +350,7 @@ def unique_aob(blob, rva):
     return None
 
 
-def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",), roots=()):
+def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",), roots=(), need=5):
     """(method name, RVA, aob bytes, site instructions, live objects, hook Type) for an Update() of a game class with live instances."""
     import capstone
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
@@ -395,10 +396,12 @@ def pick_hook(rt, res, dump, script, want=None, images=("Assembly-CSharp.dll",),
         for ins in md.disasm(blob[rva:rva + 32], text["start"] + rva):
             if "rip" in ins.op_str or (not site and ins.mnemonic == "jmp"):    # rip-relative, or a thunk that only jumps on
                 site = None; break
+            if need > 5 and ins.mnemonic.startswith(("j", "call", "loop", "ret")):   # --call copies the bytes: nothing relative among them
+                site = None; break
             site.append(f"{ins.mnemonic} {ins.op_str}".strip()); size += ins.size
-            if size >= 5:
+            if size >= need:
                 break
-        if not site:
+        if not site or (need > 5 and size < need):
             continue
         pat = unique_aob(blob, rva)
         if pat:
@@ -510,7 +513,7 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
         hops.append(("deref",))                                                  # the path names the slot, this = the object in it
         obj = await emulate(rt, read, base, hops, this_info and this_info[1])
         decl = res.find_type(ftype)
-        t = (rt.object_type(obj) if obj else None) or decl or sys.exit(f"{obj_path}: unknown class {ftype}")
+        t = (await rt.object_type_live(read, obj) if obj else None) or decl or sys.exit(f"{obj_path}: unknown class {ftype}")
         meth = res.method(t, mname, len(args))
         if meth.static:
             sys.exit(f"{meth.sig} is static, call it as {t.name}.{mname}(...)")
@@ -616,6 +619,135 @@ async def compile_call(res, rt, read, base, k, target, this_info, roots, images,
     return code, mems, syms, entries, f"{meth.sig} [{'static' if meth.static else 'this=' + obj_path}] RVA {meth.rva:#x}", ginfo
 
 
+# ---- --call: one call now, on the game's own thread (the one-shot hook of ps4-unreal-dumper's game_thread_call) ---------
+def live_cave(code, mems, syms, base, cave, hook_va, head, n):
+    """The trainer's call block as one position-independent blob for address `cave`: GetMem cells become labels behind the
+    code and are addressed rip-relative, RegisterSymbol values become numbers. Runs when the hooked method is entered:
+    Flag1 1 = armed, 2 = paths resolved and the method is being called, 3 = it returned. Hits counts the entries.
+    -> (blob, {label: offset in the blob})."""
+    from keystone import Ks, KS_ARCH_X86, KS_MODE_64          # pip install keystone-engine
+    cells = [re.match(r"GetMem\( (\w+), (\d+) \)", m).groups() for m in mems]
+    num = {m.group(1): base + int(m.group(2), 16) for m in (re.match(r"RegisterSymbol\( (\w+), ModuleBase\+(0x[0-9a-f]+) \)", x) for x in syms)}
+    names = "|".join(c for c, _ in cells) + "|Flag1"
+    lines = ["pushfq", "push rax", "push rcx", "push rdx", "push r8", "push r9",          # the frame the call block expects
+             "inc dword ptr [Hits]", "cmp byte ptr [Flag1], 1", "jne c1_end"] + code + \
+            ["c1_end:", "cmp byte ptr [Flag1], 2", "jne lc_out", "mov byte ptr [Flag1], 3",  # still 2 here: the call returned in this frame
+             "lc_out:", "pop r9", "pop r8", "pop rdx", "pop rcx", "pop rax", "popfq",
+             ".byte " + ", ".join(f"{b:#x}" for b in head[:n]),                           # the instructions the patch replaced
+             "jmp qword ptr [Back]", "Back: .quad " + hex(hook_va + n), "Hits: .long 0", "Flag1: .byte 1"] + \
+            [f"{c}: " + ".byte " + ", ".join(["0"] * int(sz)) for c, sz in cells]
+    text = "\n".join(lines)
+    text = re.sub(rf"\[({names}|Hits|Back)\]", r"[rip + \1]", text)
+    text = re.sub(r"\b(" + "|".join(num) + r")\b", lambda m: hex(num[m.group(1)]), text)
+    ks = Ks(KS_ARCH_X86, KS_MODE_64)
+    labels = {}
+
+    def resolve(name, value):                    # keystone asks for a symbol it cannot place itself: none may be left
+        labels.setdefault("?", []).append(name.decode() if isinstance(name, bytes) else name)
+        return False
+    ks.sym_resolver = resolve
+    enc, _ = ks.asm(text, cave)
+    if labels.get("?"):
+        sys.exit(f"live call: unresolved symbols {labels['?']}")
+    blob = bytes(enc)
+    # label offsets: the data sits at the end in the order written, so count back from the end
+    off, out = len(blob), {}
+    for c, sz in reversed([("Back", 8), ("Hits", 4), ("Flag1", 1)] + [(c, int(sz)) for c, sz in cells]):
+        off -= sz
+        out[c] = off
+    return blob, out
+
+
+async def live_call(a, dump, rt, res, script):
+    """il2cheat.py <dumpdir> --host IP --call "Path.Method(args)": compile the call like a call: cheat and run it once.
+    The cave is hooked into a per-frame method (pick_hook / --hook) for one call and removed again, so the method runs on
+    the thread the game calls it on, with il2cpp attached, and a managed exception is caught by il2cpp like in a trainer.
+    Without --host: dry run against the dump (cave printed, nothing sent)."""
+    import asyncio, capstone
+    spec = re.sub(r"\$(\w*)", lambda m: m.group(1) or "1", a.call)     # no menu here: $n / $Member cells are their defaults
+    if "this." in spec:
+        # ponytail: this. paths need the hooked object of the running process (rdi at the hook); add when a game has no static root
+        sys.exit("--call: start the path at a static field (Class::field); this. paths only work in a trainer")
+    dbg = pid = None
+    if a.host:
+        import ps4debug
+        dbg = ps4debug.PS4Debug(a.host)
+        pid = await il2live.game_pid(dbg)
+        bases = [e.start for e in await dbg.get_process_maps(pid) if e.name.rstrip("\0") == a.module]
+        if not bases:
+            sys.exit(f"{a.module} not mapped in pid {pid}; is the game running?")
+        rt.base = min(bases)
+
+        async def read(va, n):
+            return await dbg.read_memory(pid, va, n)
+    else:
+        async def read(va, n):
+            return dump.read(va, n)
+    base = rt.base
+    images, roots = {"Assembly-CSharp.dll"}, set()
+    gadget = return_gadget(rt, dump)
+    code, mems, syms, _e, text_, _g = await compile_call(res, rt, read, base, 1, spec, None, roots, images, gadget)
+    if gadget:
+        syms.append(f"RegisterSymbol( Gadget, ModuleBase+{gadget[0]:#x} )")
+    syms += [f"RegisterSymbol( TypeInfoTable, ModuleBase+{rt.table_off:#x} )", f"RegisterSymbol( MetadataPtr, ModuleBase+{rt.meta_off:#x} )"]
+    text, blob_text = module_text(rt, dump)
+    cave = await dbg.allocate_memory(pid, 4096) if dbg else base + 0x10000000000         # dry run: an address out of rel32 reach
+    try:
+        far = abs(cave - base) >= 2**31 - len(blob_text) - 4096
+        need, n = (14 if far else 5), 0
+        name, rva = pick_hook(rt, res, dump, script, a.hook, images, roots, need)[:2]    # a method whose first `need` bytes can be moved
+        hook_va = base + rva
+        head = await read(hook_va, 32)
+        if head[:16] != bytes(blob_text[rva:rva + 16]):
+            sys.exit(f"{name} starts differently than in the dump (a trainer hook is active there, or another game version): "
+                     "switch the trainer's master code off or choose another method with --hook Class.Method")
+        for ins in capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64).disasm(head, hook_va):
+            if "rip" in ins.op_str or ins.mnemonic.startswith(("j", "call", "loop", "ret")):
+                sys.exit(f"{name} starts with `{ins.mnemonic} {ins.op_str}` within the first {need} bytes, it cannot be moved: choose another method with --hook Class.Method")
+            n += ins.size
+            if n >= need:
+                break
+        blob, lab = live_cave(code, mems, syms, base, cave, hook_va, head, n)
+        if len(blob) > 4096:
+            sys.exit(f"live call: cave of {len(blob)} bytes does not fit one page")
+        patch = (bytes.fromhex("ff2500000000") + struct.pack("<Q", cave) if far else b"\xe9" + struct.pack("<i", cave - (hook_va + 5))).ljust(n, b"\x90")
+        print(f"call {text_}")
+        print(f"hook: {name} at {a.module}+{rva:#x} ({n} bytes moved, {'far' if far else 'near'} jump), cave {len(blob)} bytes at {cave:#x}"
+              + ("" if gadget else "; no unwind info in the module: a throwing method ends the game"))
+        if not dbg:
+            print("dry run (no --host): nothing sent. First instructions of the cave:")
+            for ins in list(capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64).disasm(blob, cave))[:12]:
+                print(f"  {ins.address:#x}  {ins.mnemonic} {ins.op_str}")
+            return
+        await dbg.write_memory(pid, cave, blob)
+        flag = hits = 0
+        try:
+            await dbg.write_memory(pid, hook_va, patch)
+            t = 0.0
+            while t < a.timeout:
+                await asyncio.sleep(0.05)
+                t += 0.05
+                flag = ((await dbg.read_memory(pid, cave + lab["Flag1"], 1)) or b"\0")[0]
+                if flag == 3:
+                    break
+        finally:
+            await dbg.write_memory(pid, hook_va, head[:n])
+        await asyncio.sleep(0.3)                             # a thread still inside the cave leaves it before it is freed
+        flag = ((await dbg.read_memory(pid, cave + lab["Flag1"], 1)) or b"\0")[0]
+        hits = struct.unpack("<I", await dbg.read_memory(pid, cave + lab["Hits"], 4))[0]
+        if flag == 3:
+            print(f"done: the method returned ({name} ran {hits}x while hooked)")
+        elif flag == 2:
+            print("the method was called but did not return through the cave: it threw (il2cpp caught and logged it) or is still running")
+        elif hits:
+            print(f"not called: {name} ran {hits}x but the path did not resolve (an object on it is null right now, or its class differs from the dump)")
+        else:
+            print(f"not called: {name} did not run within {a.timeout:g} s (not per-frame in this scene?); try --hook Class.Method")
+    finally:
+        if dbg:
+            await dbg.free_memory(pid, cave, 4096)
+
+
 async def amain(a):
     dump = il2live.Dump(a.dumpdir, a.json)
     types = il2live.parse_dump_cs(os.path.join(a.dumpdir, "sdk", "dump.cs"))
@@ -627,6 +759,9 @@ async def amain(a):
     for e in script["ScriptMethod"]:                    # SDK made with the module base as dump address: Address = VA
         if e["Address"] >= rt.base:
             e["Address"] -= rt.base
+
+    if a.call:
+        return await live_call(a, dump, rt, res, script)
 
     async def read(va, n):
         return dump.read(va, n)
@@ -797,7 +932,10 @@ if __name__ == "__main__":
     ap.add_argument("--version", default="", help="game version for the TLH header, e.g. 1.00")
     ap.add_argument("--check", help="path: print the generated hops and compare the emulation with il2live")
     ap.add_argument("--no-share", action="store_true", help="one block per call: rule even when several rules call the same method (bigger cave)")
+    ap.add_argument("--call", help='"Path.Method(args)": run this call once now on the console (--host), on the game\'s own thread; without --host a dry run')
+    ap.add_argument("--host", help="PS4/PS5 IP for --call (ps4debug)")
+    ap.add_argument("--timeout", type=float, default=5.0, help="--call: seconds to wait for the hooked method to run (default 5)")
     a = ap.parse_args()
-    if not a.check and not (a.out and a.specs):
-        ap.error("out.TLH and at least one spec, or --check path")
+    if not a.check and not a.call and not (a.out and a.specs):
+        ap.error("out.TLH and at least one spec, or --check path, or --call spec")
     asyncio.run(amain(a))
