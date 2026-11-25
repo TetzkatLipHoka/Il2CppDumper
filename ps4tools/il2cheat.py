@@ -129,7 +129,7 @@ async def compile_path(res, rt, read, base, path, classes=None, this=None):
             elif arg.startswith(":"):                           # entry whose value object is of that class
                 ct = res.find_type(arg[1:]) or sys.exit(f"{arg}: class {arg[1:]} not in dump.cs")
                 hops.append(("key_class", ct.idx, ct.full))
-            elif ktype in PRIM or (ktype != "string" and res.find_types(ktype) and all(x.kind == "enum" for x in res.find_types(ktype))):
+            elif ktype in PRIM or res.enum_of(ktype):
                 if arg.startswith("$"):                                      # {$n}: key from an editable cell, default n
                     hops.append(("key_int_cell", int(arg[1:] or "0", 0))); ftype = vtype; continue
                 hops.append(("key_int", int(arg, 0)))

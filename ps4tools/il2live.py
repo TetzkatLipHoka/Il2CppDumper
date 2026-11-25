@@ -43,6 +43,21 @@ CONST_RE = re.compile(r"^\tpublic const \S+ (?P<name>\w+) = (?P<val>-?\d+);$")
 
 
 # ---- dump.cs ---------------------------------------------------------------------------------------------------
+class TypeName(str):
+    """A type name as dump.cs writes it (no namespace) that remembers the class whose field / parameter / return / base it
+    is: Resolver.find_type picks among same-named types by that class. Equal to the plain string. Slices, split_generic
+    and Resolver.subst keep the class; a name built by other string operations is a plain str again and is resolved
+    without it, as a name typed by the user is."""
+    __slots__ = ("user",)
+
+    def __new__(cls, s, user=None):
+        o = str.__new__(cls, s); o.user = user
+        return o
+
+    def __getitem__(self, i):                       # Foo[] -> Foo (ftype[:-2]) is still a name of the same class
+        return TypeName(str.__getitem__(self, i), self.user)
+
+
 class Method:
     __slots__ = ("name", "rva", "static", "ret", "params", "vis", "cls")
 
@@ -65,7 +80,7 @@ class Method:
             p = p.split("=")[0].strip()
             if p:
                 t, _, n = p.rpartition(" ")
-                res.append((t.strip(), n))
+                res.append((TypeName(t.strip(), self.cls), n))
         return res
 
     @property
@@ -101,7 +116,8 @@ def parse_dump_cs(path):
         m = TYPE_RE.match(line)
         if m:
             bases = [b.strip() for b in m["bases"].split(",")] if m["bases"] else []
-            cur = Type(m["kind"], m["name"], ns, bases, int(m["idx"])); types[cur.full] = cur; section = "fields"; continue
+            cur = Type(m["kind"], m["name"], ns, bases, int(m["idx"])); types[cur.full] = cur; section = "fields"
+            cur.bases = [TypeName(b, cur) for b in bases]; continue
         if cur is None:
             continue
         if line == "}":
@@ -118,7 +134,7 @@ def parse_dump_cs(path):
             if m and rva > 0:
                 mods = m["mods"].split()
                 vis = next((x for x in mods if x in ("public", "private", "protected", "internal")), "private")
-                cur.sigs.setdefault(m["name"], []).append(Method(m["name"], rva, "static" in mods, m["ret"], m["params"], vis, cur))
+                cur.sigs.setdefault(m["name"], []).append(Method(m["name"], rva, "static" in mods, TypeName(m["ret"], cur), m["params"], vis, cur))
                 if m["ret"] == "void" and not m["params"] and "static" not in mods:
                     cur.methods[m["name"]] = vis
             rva = -1
@@ -136,7 +152,7 @@ def parse_dump_cs(path):
             i = 0
             while i < len(words) and words[i] in MODS:
                 i += 1
-            mods, typ, name = set(words[:i]), " ".join(words[i:-1]), words[-1]
+            mods, typ, name = set(words[:i]), TypeName(" ".join(words[i:-1]), cur), words[-1]
             if cur.kind == "enum" and name == "value__":
                 cur.enum_base = typ
             elif "static" in mods:
@@ -253,6 +269,8 @@ def split_generic(t):
         else:
             cur += ch
     args.append(cur.strip())
+    if (user := getattr(t, "user", None)) is not None:          # the arguments were written by the same class
+        return TypeName(base, user), [TypeName(a, user) for a in args]
     return base, args
 
 
@@ -611,6 +629,7 @@ class Resolver:
         longest common namespace, then UnityEngine. Measured against the C signatures in script.json on two games: 91% / 96%
         of the ambiguous parameters right (first type in the dump: 52% / 49%); the rest needs the usings (Event in a game
         class: AK.Wwise.Event or UnityEngine.Event)."""
+        user = getattr(name, "user", None) or user      # a TypeName knows the class that wrote it
         if name == "object":
             name = "System.Object"                      # the keyword, not a class that happens to be named object (ak.wwise.core.object)
         key = (name, id(user))
@@ -629,6 +648,15 @@ class Resolver:
                     -len(os.path.commonprefix([c.ns.split("."), ns.split(".")])), c.ns != "UnityEngine"))
         self.cache[key] = t
         return t
+
+    def enum_of(self, name):
+        """The enum a field / parameter type name stands for, or None. A name without its class (typed by the user, read
+        from the runtime) counts as an enum only when every type of that name is one: Type may be System.Type, a pointer."""
+        if getattr(name, "user", None) is not None:
+            t = self.find_type(name)
+            return t if t is not None and t.kind == "enum" else None
+        ts = self.find_types(name)
+        return ts[0] if ts and all(t.kind == "enum" for t in ts) else None
 
     def chain(self, t):
         """t and its base classes, cycle safe (a base name can resolve back to the class itself)."""
@@ -656,7 +684,8 @@ class Resolver:
         if not params or len(params) != len(args):
             return ft
         m = dict(zip(params, args))
-        return re.sub(r"\b\w+\b", lambda x: m.get(x.group(0), x.group(0)), ft)
+        new = re.sub(r"\b\w+\b", lambda x: m.get(x.group(0), x.group(0)), ft)
+        return ft if new == ft else TypeName(new, getattr(declared, "user", None))    # T -> the argument: a name of the class that declared the use
 
     def inherited_statics(self, t):
         """[(hops, owner Type)] for generic base classes of t that have static fields (their blocks exist per instantiation,
@@ -906,9 +935,9 @@ async def dict_key_names(res, rt, read, ktype, entry, vtype=None, d=None):
     first when that class is unique in the dictionary (int keys of such type caches are hash codes that change per session)."""
     if ktype == "string":
         return [await read_string(read, await read_u64(read, entry + 8))]
-    kinds = {t.kind for t in res.find_types(ktype)}
-    if ktype in PRIM or kinds == {"enum"}:
-        fmt = PRIM.get(ktype) or PRIM.get(res.find_types(ktype)[0].enum_base, ("i", 4))
+    et = res.enum_of(ktype)
+    if ktype in PRIM or et:
+        fmt = PRIM.get(ktype) or PRIM.get(et.enum_base, ("i", 4))
         names = [str(struct.unpack("<" + fmt[0], await read_(read, entry + 8, fmt[1]))[0])]
         if vtype and d and vtype not in PRIM and (cls := await value_class(res, rt, read, entry)):
             key = (id(read), d)
@@ -978,10 +1007,8 @@ async def read_cstr(read, va, n=96):
 def value_format(res, ftype):
     if ftype in PRIM:
         return PRIM[ftype][0]
-    ts = res.find_types(ftype)
-    if ts and all(t.kind == "enum" for t in ts):     # a short name shared by an enum and a class (Type) is a pointer
-        return PRIM.get(ts[0].enum_base, ("i", 4))[0]
-    return "Q"                                       # pointers / unknown: raw qword
+    et = res.enum_of(ftype)
+    return PRIM.get(et.enum_base, ("i", 4))[0] if et else "Q"      # pointers / unknown: raw qword
 
 
 async def read_value(res, read, addr, ftype):
